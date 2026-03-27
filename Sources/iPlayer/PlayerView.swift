@@ -66,6 +66,15 @@ final class PlayerView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
+        // 창이 활성화될 때마다 포커스 복구
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(windowBecameKey),
+            name: NSWindow.didBecomeKeyNotification, object: window
+        )
+    }
+
+    @objc private func windowBecameKey(_ notification: Notification) {
+        window?.makeFirstResponder(self)
     }
 
     private func setupView() {
@@ -357,6 +366,9 @@ final class PlayerView: NSView {
     // MARK: - 마우스: 창 드래그 이동
 
     override func mouseDown(with event: NSEvent) {
+        // 클릭할 때마다 포커스를 PlayerView로 복귀
+        window?.makeFirstResponder(self)
+
         let locationInView = convert(event.locationInWindow, from: nil)
 
         // 컨트롤 바 영역이면 창 드래그 안 함
@@ -417,10 +429,12 @@ final class PlayerView: NSView {
 
     @objc private func playButtonClicked() {
         controller.togglePlayPause()
+        window?.makeFirstResponder(self)
     }
 
     @objc private func volumeChanged() {
         controller.volume = Float(volumeSlider.doubleValue)
+        window?.makeFirstResponder(self)
     }
 
     @objc private func doubleClicked(_ gesture: NSClickGestureRecognizer) {
