@@ -315,7 +315,7 @@ final class PlayerView: NSView {
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case 49: // Space
-            controller.togglePlayPause()
+            playOrResume()
         case 3: // F
             if event.modifierFlags.contains(.command) {
                 window?.toggleFullScreen(nil)
@@ -433,8 +433,36 @@ final class PlayerView: NSView {
     // MARK: - 액션
 
     @objc private func playButtonClicked() {
-        controller.togglePlayPause()
+        playOrResume()
         window?.makeFirstResponder(self)
+    }
+
+    private func playOrResume() {
+        // 파일이 로드되어 있으면 그냥 토글
+        if controller.demuxer.formatCtx != nil {
+            controller.togglePlayPause()
+            return
+        }
+
+        // 파일이 없으면 최근 파일 목록에서 첫 번째 파일 재생 시도
+        let recent = UserDefaults.standard.stringArray(forKey: "iPlayer.recentFiles") ?? []
+        guard let lastPath = recent.first else {
+            // 최근 파일도 없음
+            controller.togglePlayPause()
+            return
+        }
+
+        if FileManager.default.fileExists(atPath: lastPath) {
+            controller.openFile(path: lastPath)
+        } else {
+            // 파일이 삭제됨
+            let alert = NSAlert()
+            alert.messageText = "파일을 찾을 수 없음"
+            alert.informativeText = "'\(URL(fileURLWithPath: lastPath).lastPathComponent)' 파일이 해당 위치에 존재하지 않습니다."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "확인")
+            alert.runModal()
+        }
     }
 
     @objc private func volumeChanged() {
@@ -443,7 +471,7 @@ final class PlayerView: NSView {
     }
 
     @objc private func doubleClicked(_ gesture: NSClickGestureRecognizer) {
-        window?.toggleFullScreen(nil)
+        window?.zoom(nil)
     }
 
     // MARK: - 드래그 앤 드롭 (파일)

@@ -12,6 +12,7 @@ struct iPlayerApp {
         fputs("iPlayer - FFmpeg avcodec \(major).\(minor).\(micro)\n", stderr)
 
         let app = NSApplication.shared
+        app.setActivationPolicy(.regular)  // 독립 앱으로 인식 → 포커스 수신 가능
         let delegate = AppDelegate()
         app.delegate = delegate
         app.run()
@@ -72,6 +73,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         window.acceptsMouseMovedEvents = true
 
         NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(window.contentView)
 
         let args = CommandLine.arguments
         if args.count > 1 {
