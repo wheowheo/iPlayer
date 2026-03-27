@@ -40,22 +40,32 @@ final class PlayerController: @unchecked Sendable {
     var onStateChange: ((PlaybackState) -> Void)?
     var onMediaInfo: ((MediaInfo) -> Void)?
 
+    // 스레드
     private var readThread: Thread?
     private var renderThread: Thread?
     private var isReading = false
     private var isRendering = false
+    private let readThreadDone = DispatchSemaphore(value: 0)
+    private let renderThreadDone = DispatchSemaphore(value: 0)
+
+    // 프레임 큐
     private var videoFrameQueue: [VideoFrame] = []
     private let queueLock = NSLock()
+
+    // seek 제어: read thread가 직접 수행
+    private var seekRequest: Double? = nil
+    private let seekLock = NSLock()
+
+    // 통계
     private(set) var droppedFrames: Int = 0
     private(set) var renderedFrames: Int = 0
     private var fpsCounter = 0
     private var fpsTimerStart: Double = 0
     private(set) var currentFPS: Double = 0
-    private var isSeeking = false
 
-    // 재생 시작 기준
-    private var playbackStartTime: Double = 0  // CACurrentMediaTime 기준
-    private var playbackStartPTS: Double = 0   // 시작 PTS
+    // 재생 클럭
+    private var playbackStartWall: Double = 0
+    private var playbackStartPTS: Double = 0
     private var hasAudio: Bool = false
 
     struct MediaInfo {
@@ -74,6 +84,8 @@ final class PlayerController: @unchecked Sendable {
         var hwAccelerated: Bool = false
         var duration: Double = 0
     }
+
+    // MARK: - 공개 API
 
     func openFile(path: String) {
         stop()
@@ -96,8 +108,6 @@ final class PlayerController: @unchecked Sendable {
         if demuxer.selectedAudioIndex >= 0, let fmtCtx = demuxer.formatCtx {
             if audioDecoder.open(formatCtx: fmtCtx, streamIndex: demuxer.selectedAudioIndex) {
                 hasAudio = true
-            } else {
-                log("[Player] 오디오 디코더 열기 실패 - 오디오 없이 재생")
             }
         }
 
@@ -116,20 +126,13 @@ final class PlayerController: @unchecked Sendable {
         guard demuxer.formatCtx != nil else { return }
 
         if state == .idle || state == .stopped {
-            if hasAudio {
-                _ = audioOutput.start()
-            }
+            if hasAudio { _ = audioOutput.start() }
             startReadThread()
-            // 초기 버퍼링: 프레임이 좀 쌓일 때까지 대기
-            Thread.sleep(forTimeInterval: 0.1)
+            Thread.sleep(forTimeInterval: 0.15)
             startRenderThread()
         } else if state == .paused {
-            if hasAudio {
-                audioOutput.resume()
-            }
-            // 일시정지에서 복귀: 시간 기준점 재설정
-            playbackStartTime = CACurrentMediaTime()
-            playbackStartPTS = currentTime
+            if hasAudio { audioOutput.resume() }
+            resetClock(fromPTS: currentTime)
             startRenderThread()
         }
 
@@ -139,10 +142,8 @@ final class PlayerController: @unchecked Sendable {
 
     func pause() {
         guard state == .playing else { return }
-        if hasAudio {
-            audioOutput.pause()
-        }
-        isRendering = false
+        if hasAudio { audioOutput.pause() }
+        stopRenderThread()
         state = .paused
         onStateChange?(state)
     }
@@ -153,10 +154,9 @@ final class PlayerController: @unchecked Sendable {
     }
 
     func stop() {
-        isReading = false
-        isRendering = false
-        readThread = nil
-        renderThread = nil
+        // 스레드를 먼저 확실히 종료한 후 리소스 해제
+        stopRenderThread()
+        stopReadThread()
 
         audioOutput.stop()
         videoDecoder.close()
@@ -166,6 +166,10 @@ final class PlayerController: @unchecked Sendable {
         queueLock.lock()
         videoFrameQueue.removeAll()
         queueLock.unlock()
+
+        seekLock.lock()
+        seekRequest = nil
+        seekLock.unlock()
 
         currentTime = 0
         droppedFrames = 0
@@ -180,26 +184,11 @@ final class PlayerController: @unchecked Sendable {
     func seek(to seconds: Double) {
         guard demuxer.formatCtx != nil else { return }
         let target = max(0, min(seconds, duration))
-        isSeeking = true
 
-        demuxer.seek(to: target)
-        videoDecoder.flush()
-        audioDecoder.flush()
-        audioOutput.reset()
-
-        queueLock.lock()
-        videoFrameQueue.removeAll()
-        queueLock.unlock()
-
-        currentTime = target
-        playbackStartTime = CACurrentMediaTime()
-        playbackStartPTS = target
-        isSeeking = false
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.onTimeUpdate?(self.currentTime, self.duration)
-        }
+        // seek 요청을 read thread에 위임 (thread-safe)
+        seekLock.lock()
+        seekRequest = target
+        seekLock.unlock()
     }
 
     func seekRelative(seconds: Double) {
@@ -232,7 +221,216 @@ final class PlayerController: @unchecked Sendable {
         log("[Player] 자막 로드: \(subtitles.count)개 항목")
     }
 
-    // MARK: - Private
+    // MARK: - 스레드 관리
+
+    private func startReadThread() {
+        isReading = true
+        readThread = Thread { [weak self] in
+            self?.readLoop()
+            self?.readThreadDone.signal()
+        }
+        readThread?.name = "iPlayer.Read"
+        readThread?.qualityOfService = .userInteractive
+        readThread?.start()
+    }
+
+    private func stopReadThread() {
+        guard isReading else { return }
+        isReading = false
+        readThreadDone.wait()
+        readThread = nil
+    }
+
+    private func startRenderThread() {
+        guard !isRendering else { return }
+        isRendering = true
+        resetClock(fromPTS: currentTime)
+        fpsTimerStart = CACurrentMediaTime()
+        fpsCounter = 0
+
+        renderThread = Thread { [weak self] in
+            self?.renderLoop()
+            self?.renderThreadDone.signal()
+        }
+        renderThread?.name = "iPlayer.Render"
+        renderThread?.qualityOfService = .userInteractive
+        renderThread?.start()
+    }
+
+    private func stopRenderThread() {
+        guard isRendering else { return }
+        isRendering = false
+        renderThreadDone.wait()
+        renderThread = nil
+    }
+
+    private func resetClock(fromPTS pts: Double) {
+        playbackStartWall = CACurrentMediaTime()
+        playbackStartPTS = pts
+    }
+
+    // MARK: - Read Loop
+
+    private func readLoop() {
+        while isReading {
+            // seek 요청 처리 (이 스레드에서만 demuxer/decoder 접근)
+            seekLock.lock()
+            let pendingSeek = seekRequest
+            seekRequest = nil
+            seekLock.unlock()
+
+            if let target = pendingSeek {
+                performSeek(to: target)
+            }
+
+            // 큐 배압 제어
+            queueLock.lock()
+            let queueSize = videoFrameQueue.count
+            queueLock.unlock()
+
+            if queueSize > 120 {
+                Thread.sleep(forTimeInterval: 0.005)
+                continue
+            }
+
+            guard let packet = demuxer.readPacket() else {
+                Thread.sleep(forTimeInterval: 0.02)
+                continue
+            }
+
+            defer {
+                var pkt: UnsafeMutablePointer<AVPacket>? = packet
+                av_packet_free(&pkt)
+            }
+
+            if packet.pointee.stream_index == demuxer.selectedVideoIndex {
+                let frames = videoDecoder.decode(packet: packet)
+                if !frames.isEmpty {
+                    queueLock.lock()
+                    videoFrameQueue.append(contentsOf: frames)
+                    queueLock.unlock()
+                }
+            } else if packet.pointee.stream_index == demuxer.selectedAudioIndex {
+                let buffers = audioDecoder.decode(packet: packet)
+                for buf in buffers {
+                    audioOutput.enqueue(buffer: buf)
+                }
+            }
+        }
+    }
+
+    /// read thread 내에서만 호출 - thread safe
+    private func performSeek(to target: Double) {
+        demuxer.seek(to: target)
+        videoDecoder.flush()
+        audioDecoder.flush()
+        audioOutput.reset()
+
+        queueLock.lock()
+        videoFrameQueue.removeAll()
+        queueLock.unlock()
+
+        currentTime = target
+        resetClock(fromPTS: target)
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.onTimeUpdate?(self.currentTime, self.duration)
+        }
+    }
+
+    // MARK: - Render Loop
+
+    private func renderLoop() {
+        while isRendering {
+            guard state == .playing else {
+                Thread.sleep(forTimeInterval: 0.01)
+                continue
+            }
+
+            // 마스터 클럭 계산
+            let clock: Double
+            if hasAudio && audioOutput.currentPTS > 0 {
+                clock = audioOutput.currentPTS
+            } else {
+                let elapsed = (CACurrentMediaTime() - playbackStartWall) * Double(playbackSpeed)
+                clock = playbackStartPTS + elapsed
+            }
+            let masterClock = min(clock, duration)
+            currentTime = masterClock
+
+            // EOF
+            if duration > 0 && masterClock >= duration - 0.05 {
+                queueLock.lock()
+                let empty = videoFrameQueue.isEmpty
+                queueLock.unlock()
+                if empty {
+                    currentTime = duration
+                    DispatchQueue.main.async { [weak self] in
+                        self?.pause()
+                        self?.onTimeUpdate?(self?.duration ?? 0, self?.duration ?? 0)
+                    }
+                    break
+                }
+            }
+
+            // 프레임 선택
+            queueLock.lock()
+            var frameToShow: VideoFrame?
+
+            while let first = videoFrameQueue.first {
+                let diff = first.pts - masterClock
+                if diff < -0.1 {
+                    videoFrameQueue.removeFirst()
+                    droppedFrames += 1
+                } else if diff <= 0.02 {
+                    frameToShow = first
+                    videoFrameQueue.removeFirst()
+                    break
+                } else {
+                    break
+                }
+            }
+            queueLock.unlock()
+
+            // FPS 측정
+            let now = CACurrentMediaTime()
+            if now - fpsTimerStart >= 1.0 {
+                currentFPS = Double(fpsCounter) / (now - fpsTimerStart)
+                fpsCounter = 0
+                fpsTimerStart = now
+            }
+
+            if let frame = frameToShow {
+                renderedFrames += 1
+                fpsCounter += 1
+                DispatchQueue.main.async { [weak self] in
+                    self?.onFrameReady?(frame)
+                }
+            }
+
+            // UI 업데이트
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.onTimeUpdate?(self.currentTime, self.duration)
+                self.updateSubtitle()
+            }
+
+            // 슬립
+            queueLock.lock()
+            let sleepTime: Double
+            if let next = videoFrameQueue.first {
+                let wait = next.pts - masterClock
+                sleepTime = max(0.001, min(wait * 0.7, 0.016))
+            } else {
+                sleepTime = 0.003
+            }
+            queueLock.unlock()
+            Thread.sleep(forTimeInterval: sleepTime)
+        }
+    }
+
+    // MARK: - 유틸
 
     private func loadSubtitleAutomatic(videoPath: String) {
         let base = (videoPath as NSString).deletingPathExtension
@@ -266,171 +464,6 @@ final class PlayerController: @unchecked Sendable {
         info.hwAccelerated = videoDecoder.isHardwareAccelerated
         info.duration = duration
         return info
-    }
-
-    // MARK: - Read Thread (패킷 읽기 + 디코딩)
-
-    private func startReadThread() {
-        isReading = true
-        readThread = Thread { [weak self] in
-            self?.readLoop()
-        }
-        readThread?.name = "iPlayer.Read"
-        readThread?.qualityOfService = .userInteractive
-        readThread?.start()
-    }
-
-    private func readLoop() {
-        while isReading {
-            queueLock.lock()
-            let queueSize = videoFrameQueue.count
-            queueLock.unlock()
-
-            if queueSize > 120 {
-                Thread.sleep(forTimeInterval: 0.005)
-                continue
-            }
-
-            guard let packet = demuxer.readPacket() else {
-                // EOF 도달
-                Thread.sleep(forTimeInterval: 0.05)
-                continue
-            }
-
-            defer {
-                var pkt: UnsafeMutablePointer<AVPacket>? = packet
-                av_packet_free(&pkt)
-            }
-
-            if packet.pointee.stream_index == demuxer.selectedVideoIndex {
-                let frames = videoDecoder.decode(packet: packet)
-                if !frames.isEmpty {
-                    queueLock.lock()
-                    videoFrameQueue.append(contentsOf: frames)
-                    queueLock.unlock()
-                }
-            } else if packet.pointee.stream_index == demuxer.selectedAudioIndex {
-                let buffers = audioDecoder.decode(packet: packet)
-                for buf in buffers {
-                    audioOutput.enqueue(buffer: buf)
-                }
-            }
-        }
-    }
-
-    // MARK: - Render Thread (PTS 기반 프레임 표시)
-
-    private func startRenderThread() {
-        isRendering = true
-
-        // 시간 기준점 설정
-        queueLock.lock()
-        if let firstFrame = videoFrameQueue.first {
-            playbackStartPTS = firstFrame.pts
-        } else {
-            playbackStartPTS = currentTime
-        }
-        queueLock.unlock()
-        playbackStartTime = CACurrentMediaTime()
-        fpsTimerStart = playbackStartTime
-        fpsCounter = 0
-
-        renderThread = Thread { [weak self] in
-            self?.renderLoop()
-        }
-        renderThread?.name = "iPlayer.Render"
-        renderThread?.qualityOfService = .userInteractive
-        renderThread?.start()
-    }
-
-    private func renderLoop() {
-        while isRendering {
-            guard state == .playing, !isSeeking else {
-                Thread.sleep(forTimeInterval: 0.01)
-                continue
-            }
-
-            // 현재 재생 시각 계산
-            let clock: Double
-            if hasAudio && audioOutput.currentPTS > 0 {
-                // 오디오 마스터 클럭
-                clock = audioOutput.currentPTS
-            } else {
-                // 벽시계 기반 클럭 (오디오 없을 때)
-                let elapsed = (CACurrentMediaTime() - playbackStartTime) * Double(playbackSpeed)
-                clock = playbackStartPTS + elapsed
-            }
-            let masterClock = min(clock, duration)
-            currentTime = masterClock
-
-            // EOF 체크
-            if duration > 0 && masterClock >= duration {
-                currentTime = duration
-                DispatchQueue.main.async { [weak self] in
-                    self?.pause()
-                    self?.onTimeUpdate?(self?.duration ?? 0, self?.duration ?? 0)
-                }
-                break
-            }
-
-            // 비디오 프레임 처리
-            queueLock.lock()
-            var frameToShow: VideoFrame?
-
-            while let first = videoFrameQueue.first {
-                let diff = first.pts - masterClock
-                if diff < -0.1 {
-                    // 늦은 프레임: 드롭
-                    videoFrameQueue.removeFirst()
-                    droppedFrames += 1
-                } else if diff <= 0.02 {
-                    // 표시할 타이밍
-                    frameToShow = first
-                    videoFrameQueue.removeFirst()
-                    break
-                } else {
-                    // 아직 이른 프레임 - 대기
-                    break
-                }
-            }
-            queueLock.unlock()
-
-            // FPS 측정
-            let now = CACurrentMediaTime()
-            if now - fpsTimerStart >= 1.0 {
-                currentFPS = Double(fpsCounter) / (now - fpsTimerStart)
-                fpsCounter = 0
-                fpsTimerStart = now
-            }
-
-            if let frame = frameToShow {
-                renderedFrames += 1
-                fpsCounter += 1
-                DispatchQueue.main.async { [weak self] in
-                    self?.onFrameReady?(frame)
-                }
-            }
-
-            // 시간 업데이트 (매 프레임 아니라 주기적으로)
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                self.onTimeUpdate?(self.currentTime, self.duration)
-                self.updateSubtitle()
-            }
-
-            // 다음 프레임까지 슬립 (CPU 절약, ~60fps 기준)
-            // 큐에 다음 프레임이 있으면 그 PTS까지, 없으면 짧게 대기
-            queueLock.lock()
-            let sleepTime: Double
-            if let next = videoFrameQueue.first {
-                let waitUntil = next.pts - masterClock
-                sleepTime = max(0.001, min(waitUntil * 0.8, 0.016))
-            } else {
-                sleepTime = 0.002
-            }
-            queueLock.unlock()
-            Thread.sleep(forTimeInterval: sleepTime)
-        }
     }
 
     private func updateSubtitle() {
