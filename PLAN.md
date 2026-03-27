@@ -8,11 +8,11 @@
 - **커밋**: "프로젝트 초기 구조 및 FFmpeg 바인딩 설정"
 
 ## Phase 2: 비디오 디코딩 파이프라인
-- [ ] FFmpeg demuxer 래퍼 (파일 열기, 스트림 탐색)
-- [ ] 비디오 디코더 (HW 가속 우선, SW 폴백)
-- [ ] 프레임을 CVPixelBuffer/CGImage로 변환
-- [ ] CALayer에 프레임 표시
-- [ ] 기본 재생 루프 (타이머 기반)
+- [x] FFmpeg demuxer 래퍼 (파일 열기, 스트림 탐색)
+- [x] 비디오 디코더 (HW 가속 우선, SW 폴백)
+- [x] 프레임을 CVPixelBuffer/CGImage로 변환
+- [x] CALayer에 프레임 표시
+- [x] 기본 재생 루프 (DisplayLink 기반)
 - **커밋**: "비디오 디코딩 및 화면 출력 구현"
 
 ## Phase 3: 오디오 디코딩 및 A/V 싱크

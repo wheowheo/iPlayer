@@ -19,3 +19,10 @@
   - `av_frame_free`는 `UnsafeMutablePointer<AVFrame>?`를 인아웃으로 받음
   - Swift 6의 Sendable 클로저 제약으로 Timer 콜백에서 MainActor 격리 필요
 - 링커 경고(macOS 14.0 vs 26.0)는 Homebrew FFmpeg이 최신 SDK로 빌드되어 발생, 무해함
+
+### 2026-03-27: Phase 2 비디오 디코딩 파이프라인 동작 확인
+- H.264 테스트 비디오에서 VideoToolbox HW 가속 디코딩 성공
+- AAC 오디오 디코더 + swresample 변환 정상 동작
+- GUI 앱에서 print()는 터미널에 출력 안됨 → fputs(stderr)로 로그 함수 분리
+- application(_:openFile:)이 applicationDidFinishLaunching 전에 호출될 수 있어 nil 체크 필요
+- CVPixelBuffer를 HW 디코딩에서 추출 시 retain 필요 (프레임 재사용으로 인한 dangling 방지)

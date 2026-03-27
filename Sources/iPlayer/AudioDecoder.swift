@@ -27,13 +27,13 @@ final class AudioDecoder {
         timeBase = stream.pointee.time_base
 
         guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else {
-            print("[AudioDecoder] 코덱을 찾을 수 없음")
+            log("[AudioDecoder] 코덱을 찾을 수 없음")
             return false
         }
         codecName = String(cString: codec.pointee.name)
 
         guard let ctx = avcodec_alloc_context3(codec) else {
-            print("[AudioDecoder] 컨텍스트 할당 실패")
+            log("[AudioDecoder] 컨텍스트 할당 실패")
             return false
         }
         self.codecCtx = ctx
@@ -43,13 +43,13 @@ final class AudioDecoder {
         channels = ctx.pointee.ch_layout.nb_channels
 
         if avcodec_open2(ctx, codec, nil) < 0 {
-            print("[AudioDecoder] 코덱 열기 실패")
+            log("[AudioDecoder] 코덱 열기 실패")
             close()
             return false
         }
 
         setupResampler(ctx: ctx)
-        print("[AudioDecoder] 열림: \(codecName) \(sampleRate)Hz \(channels)ch")
+        log("[AudioDecoder] 열림: \(codecName) \(sampleRate)Hz \(channels)ch")
         return true
     }
 

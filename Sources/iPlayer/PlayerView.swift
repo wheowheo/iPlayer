@@ -44,6 +44,11 @@ final class PlayerView: NSView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.makeFirstResponder(self)
+    }
+
     private func setupView() {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
@@ -276,10 +281,10 @@ final class PlayerView: NSView {
             }
         case 27: // - (자막 싱크 뒤로)
             controller.subtitleOffset -= 0.5
-            print("자막 오프셋: \(controller.subtitleOffset)초")
+            log("자막 오프셋: \(controller.subtitleOffset)초")
         case 24: // = (자막 싱크 앞으로)
             controller.subtitleOffset += 0.5
-            print("자막 오프셋: \(controller.subtitleOffset)초")
+            log("자막 오프셋: \(controller.subtitleOffset)초")
         default:
             super.keyDown(with: event)
         }

@@ -42,13 +42,13 @@ final class Demuxer {
     func open(path: String) -> Bool {
         var ctx: UnsafeMutablePointer<AVFormatContext>? = nil
         guard avformat_open_input(&ctx, path, nil, nil) == 0, let ctx = ctx else {
-            print("[Demuxer] 파일 열기 실패: \(path)")
+            log("[Demuxer] 파일 열기 실패: \(path)")
             return false
         }
         self.formatCtx = ctx
 
         guard avformat_find_stream_info(ctx, nil) >= 0 else {
-            print("[Demuxer] 스트림 정보 탐색 실패")
+            log("[Demuxer] 스트림 정보 탐색 실패")
             close()
             return false
         }
@@ -103,7 +103,7 @@ final class Demuxer {
             }
         }
 
-        print("[Demuxer] 열림: V=\(videoStreams.count) A=\(audioStreams.count) S=\(subtitleStreams.count) 길이=\(String(format: "%.1f", duration))초")
+        log("[Demuxer] 열림: V=\(videoStreams.count) A=\(audioStreams.count) S=\(subtitleStreams.count) 길이=\(String(format: "%.1f", duration))초")
         return true
     }
 

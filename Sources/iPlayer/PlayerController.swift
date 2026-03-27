@@ -85,7 +85,7 @@ final class PlayerController: @unchecked Sendable {
         stop()
 
         guard demuxer.open(path: path) else {
-            print("[Player] 파일 열기 실패")
+            log("[Player] 파일 열기 실패")
             return
         }
         filePath = path
@@ -94,7 +94,7 @@ final class PlayerController: @unchecked Sendable {
         // 비디오 디코더 초기화
         if demuxer.selectedVideoIndex >= 0, let fmtCtx = demuxer.formatCtx {
             guard videoDecoder.open(formatCtx: fmtCtx, streamIndex: demuxer.selectedVideoIndex) else {
-                print("[Player] 비디오 디코더 열기 실패")
+                log("[Player] 비디오 디코더 열기 실패")
                 return
             }
         }
@@ -102,7 +102,7 @@ final class PlayerController: @unchecked Sendable {
         // 오디오 디코더 초기화
         if demuxer.selectedAudioIndex >= 0, let fmtCtx = demuxer.formatCtx {
             guard audioDecoder.open(formatCtx: fmtCtx, streamIndex: demuxer.selectedAudioIndex) else {
-                print("[Player] 오디오 디코더 열기 실패")
+                log("[Player] 오디오 디코더 열기 실패")
                 return
             }
         }
@@ -229,7 +229,7 @@ final class PlayerController: @unchecked Sendable {
     func loadSubtitle(path: String) {
         let url = URL(fileURLWithPath: path)
         subtitles = SubtitleParser.parse(fileURL: url)
-        print("[Player] 자막 로드: \(subtitles.count)개 항목")
+        log("[Player] 자막 로드: \(subtitles.count)개 항목")
     }
 
     // MARK: - Private

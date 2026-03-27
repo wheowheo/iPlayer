@@ -19,13 +19,13 @@ final class VideoDecoder {
         timeBase = stream.pointee.time_base
 
         guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else {
-            print("[VideoDecoder] 코덱을 찾을 수 없음")
+            log("[VideoDecoder] 코덱을 찾을 수 없음")
             return false
         }
         codecName = String(cString: codec.pointee.name)
 
         guard let ctx = avcodec_alloc_context3(codec) else {
-            print("[VideoDecoder] 컨텍스트 할당 실패")
+            log("[VideoDecoder] 컨텍스트 할당 실패")
             return false
         }
         self.codecCtx = ctx
@@ -36,14 +36,14 @@ final class VideoDecoder {
 
         if tryHardwareAcceleration(ctx: ctx, codec: codec) {
             isHardwareAccelerated = true
-            print("[VideoDecoder] HW 가속 활성화 (VideoToolbox) - \(codecName)")
+            log("[VideoDecoder] HW 가속 활성화 (VideoToolbox) - \(codecName)")
         } else {
-            print("[VideoDecoder] SW 디코딩으로 폴백 - \(codecName)")
+            log("[VideoDecoder] SW 디코딩으로 폴백 - \(codecName)")
         }
 
         ctx.pointee.thread_count = 0
         if avcodec_open2(ctx, codec, nil) < 0 {
-            print("[VideoDecoder] 코덱 열기 실패")
+            log("[VideoDecoder] 코덱 열기 실패")
             close()
             return false
         }
@@ -86,7 +86,7 @@ final class VideoDecoder {
 
             if isHardwareAccelerated && f.pointee.format == AV_PIX_FMT_VIDEOTOOLBOX.rawValue {
                 if let pixelBuffer = f.pointee.data.3 {
-                    let cvBuf = Unmanaged<CVPixelBuffer>.fromOpaque(pixelBuffer).takeUnretainedValue()
+                    let cvBuf = Unmanaged<CVPixelBuffer>.fromOpaque(pixelBuffer).retain().takeRetainedValue()
                     frames.append(VideoFrame(pixelBuffer: cvBuf, pts: pts, width: width, height: height))
                 }
             } else {

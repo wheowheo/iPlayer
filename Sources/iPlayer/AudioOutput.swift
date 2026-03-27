@@ -62,7 +62,7 @@ final class AudioOutput {
         )
 
         guard status == noErr, let queue = audioQueue else {
-            print("[AudioOutput] AudioQueue 생성 실패: \(status)")
+            log("[AudioOutput] AudioQueue 생성 실패: \(status)")
             return false
         }
 

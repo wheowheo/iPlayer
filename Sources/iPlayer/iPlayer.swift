@@ -8,7 +8,7 @@ struct iPlayerApp {
         let major = version >> 16
         let minor = (version >> 8) & 0xFF
         let micro = version & 0xFF
-        print("iPlayer - FFmpeg avcodec \(major).\(minor).\(micro)")
+        fputs("iPlayer - FFmpeg avcodec \(major).\(minor).\(micro)\n", stderr)
 
         let app = NSApplication.shared
         let delegate = AppDelegate()
@@ -43,6 +43,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         window.acceptsMouseMovedEvents = true
 
         NSApp.activate(ignoringOtherApps: true)
+
+        // 명령줄 인자로 파일 열기
+        let args = CommandLine.arguments
+        if args.count > 1 {
+            let path = args[1]
+            playerController.openFile(path: path)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -50,7 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     func application(_ sender: NSApplication, openFile filename: String) -> Bool {
-        playerController.openFile(path: filename)
+        guard let pc = playerController else { return false }
+        pc.openFile(path: filename)
         return true
     }
 
