@@ -159,9 +159,11 @@ final class PlayerView: NSView {
 
         controller.onTimeUpdate = { [weak self] current, total in
             guard let self = self else { return }
-            // seekBar가 사용자 드래그 중이면 업데이트 안 함
             if !self.seekBar.isSeeking {
                 self.updateTimeDisplay(current: current, total: total)
+            }
+            if self.showInfo {
+                self.updateInfoOverlay()
             }
         }
 
@@ -293,6 +295,7 @@ final class PlayerView: NSView {
         let info = mediaInfo ?? PlayerController.MediaInfo()
         let rotStr = info.rotation != 0 ? " (rot: \(Int(info.rotation))°)" : ""
         let text = """
+        Time: \(formatTime(controller.currentTime)) / \(formatTime(controller.duration))
         FPS: \(String(format: "%.1f", controller.currentFPS))
         Video: \(info.videoCodec) \(info.width)x\(info.height)\(rotStr)
         Display: \(info.displayWidth)x\(info.displayHeight)
@@ -336,6 +339,8 @@ final class PlayerView: NSView {
             updateInfoOverlay()
         case 46: // M
             controller.isMuted.toggle()
+        case 31: // O
+            NSApp.sendAction(#selector(AppDelegate.openFileAction(_:)), to: nil, from: self)
         case 53: // Esc
             if let window = self.window, window.styleMask.contains(.fullScreen) {
                 window.toggleFullScreen(nil)

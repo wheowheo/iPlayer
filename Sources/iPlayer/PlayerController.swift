@@ -215,6 +215,26 @@ final class PlayerController: @unchecked Sendable {
         }
     }
 
+    func selectAudioTrack(index: Int32) {
+        guard let fmtCtx = demuxer.formatCtx else { return }
+        let wasPlaying = state == .playing
+        if wasPlaying { pause() }
+
+        let savedTime = currentTime
+        audioDecoder.close()
+        demuxer.selectedAudioIndex = index
+
+        if audioDecoder.open(formatCtx: fmtCtx, streamIndex: index) {
+            hasAudio = true
+            log("[Player] 오디오 트랙 변경: \(index)")
+        }
+
+        if wasPlaying {
+            seek(to: savedTime)
+            play()
+        }
+    }
+
     func loadSubtitle(path: String) {
         let url = URL(fileURLWithPath: path)
         subtitles = SubtitleParser.parse(fileURL: url)
