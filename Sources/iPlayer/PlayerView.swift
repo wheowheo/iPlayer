@@ -29,6 +29,10 @@ final class PlayerView: NSView {
     private var hideTimer: Timer?
     private var controlsVisible = true
 
+    // 창 드래그용
+    private var isDraggingWindow = false
+    private var windowDragStart: NSPoint = .zero
+
     // 드래그 앤 드롭
     private let supportedTypes: [NSPasteboard.PasteboardType] = [.fileURL, .URL, .string]
 
@@ -45,6 +49,20 @@ final class PlayerView: NSView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    // 방향키가 시스템에 먹히지 않도록
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        switch event.keyCode {
+        case 123, 124, 125, 126: // ← → ↓ ↑
+            keyDown(with: event)
+            return true
+        case 48: // Tab
+            keyDown(with: event)
+            return true
+        default:
+            return super.performKeyEquivalent(with: event)
+        }
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
@@ -54,12 +72,10 @@ final class PlayerView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
 
-        // 비디오 레이어
         videoLayer.contentsGravity = .resizeAspect
         videoLayer.backgroundColor = NSColor.black.cgColor
         layer?.addSublayer(videoLayer)
 
-        // 자막
         subtitleLabel.alignment = .center
         subtitleLabel.font = .systemFont(ofSize: 22, weight: .medium)
         subtitleLabel.textColor = .white
@@ -71,7 +87,6 @@ final class PlayerView: NSView {
         subtitleLabel.isHidden = true
         addSubview(subtitleLabel)
 
-        // 정보 오버레이
         infoOverlay.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         infoOverlay.textColor = .green
         infoOverlay.backgroundColor = NSColor.black.withAlphaComponent(0.7)
@@ -81,12 +96,10 @@ final class PlayerView: NSView {
         infoOverlay.isHidden = true
         addSubview(infoOverlay)
 
-        // 컨트롤 바
         controlBar.wantsLayer = true
         controlBar.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.7).cgColor
         addSubview(controlBar)
 
-        // 재생 버튼
         playButton.bezelStyle = .inline
         playButton.title = "▶"
         playButton.font = .systemFont(ofSize: 16)
@@ -95,7 +108,6 @@ final class PlayerView: NSView {
         playButton.action = #selector(playButtonClicked)
         controlBar.addSubview(playButton)
 
-        // 시크바
         seekBar.onSeek = { [weak self] fraction in
             guard let self = self else { return }
             let target = fraction * self.controller.duration
@@ -103,7 +115,6 @@ final class PlayerView: NSView {
         }
         controlBar.addSubview(seekBar)
 
-        // 시간 라벨
         timeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         timeLabel.textColor = .white
         timeLabel.backgroundColor = .clear
@@ -111,7 +122,6 @@ final class PlayerView: NSView {
         timeLabel.isEditable = false
         controlBar.addSubview(timeLabel)
 
-        // 볼륨
         volumeSlider.minValue = 0
         volumeSlider.maxValue = 2.0
         volumeSlider.doubleValue = 1.0
@@ -119,7 +129,6 @@ final class PlayerView: NSView {
         volumeSlider.action = #selector(volumeChanged)
         controlBar.addSubview(volumeSlider)
 
-        // 속도 라벨
         speedLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         speedLabel.textColor = .lightGray
         speedLabel.backgroundColor = .clear
@@ -127,10 +136,8 @@ final class PlayerView: NSView {
         speedLabel.isEditable = false
         controlBar.addSubview(speedLabel)
 
-        // 드래그 앤 드롭
         registerForDraggedTypes(supportedTypes)
 
-        // 더블클릭 -> 전체화면
         let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(doubleClicked))
         doubleClick.numberOfClicksRequired = 2
         addGestureRecognizer(doubleClick)
@@ -142,7 +149,11 @@ final class PlayerView: NSView {
         }
 
         controller.onTimeUpdate = { [weak self] current, total in
-            self?.updateTimeDisplay(current: current, total: total)
+            guard let self = self else { return }
+            // seekBar가 사용자 드래그 중이면 업데이트 안 함
+            if !self.seekBar.isSeeking {
+                self.updateTimeDisplay(current: current, total: total)
+            }
         }
 
         controller.onSubtitleUpdate = { [weak self] text in
@@ -177,23 +188,18 @@ final class PlayerView: NSView {
         super.layout()
 
         let bounds = self.bounds
-        // rotation이 90/270도이면 레이어 크기를 뒤집어서 화면에 맞춤
         if videoRotation == 90 || videoRotation == 270 {
-            // 세로 영상: 가로세로를 뒤집어서 aspect fit 계산
             let videoAspect = CGFloat(mediaInfo?.height ?? 9) / CGFloat(mediaInfo?.width ?? 16)
             let viewAspect = bounds.width / bounds.height
             var layerWidth: CGFloat
             var layerHeight: CGFloat
             if videoAspect > viewAspect {
-                // 너비 기준
                 layerWidth = bounds.width
                 layerHeight = bounds.width / videoAspect
             } else {
-                // 높이 기준
                 layerHeight = bounds.height
                 layerWidth = bounds.height * videoAspect
             }
-            // 레이어는 회전 전 크기이므로 가로세로를 반대로 설정
             let layerFrame = NSRect(
                 x: (bounds.width - layerWidth) / 2,
                 y: (bounds.height - layerHeight) / 2,
@@ -201,22 +207,18 @@ final class PlayerView: NSView {
                 height: layerHeight
             )
             videoLayer.frame = layerFrame
-            // 회전 후 레이어 내부의 content가 맞게 보이도록 bounds 조정
             videoLayer.bounds = CGRect(x: 0, y: 0, width: layerHeight, height: layerWidth)
         } else {
             videoLayer.frame = bounds
             videoLayer.bounds = CGRect(origin: .zero, size: bounds.size)
         }
 
-        // 컨트롤 바
         let barHeight: CGFloat = 50
         controlBar.frame = NSRect(x: 0, y: 0, width: bounds.width, height: barHeight)
 
-        // 시크바
         let seekY: CGFloat = 30
         seekBar.frame = NSRect(x: 10, y: seekY, width: bounds.width - 20, height: 16)
 
-        // 하단 컨트롤
         let btnSize: CGFloat = 30
         playButton.frame = NSRect(x: 10, y: 2, width: btnSize, height: 24)
 
@@ -227,17 +229,17 @@ final class PlayerView: NSView {
         speedLabel.frame = NSRect(x: bounds.width - volWidth - 50, y: 4, width: 40, height: 20)
         volumeSlider.frame = NSRect(x: bounds.width - volWidth - 5, y: 4, width: volWidth, height: 20)
 
-        // 자막
         let subHeight: CGFloat = 80
         subtitleLabel.frame = NSRect(x: 40, y: barHeight + 10, width: bounds.width - 80, height: subHeight)
 
-        // 정보 오버레이
         infoOverlay.frame = NSRect(x: 10, y: bounds.height - 180, width: 350, height: 170)
     }
 
     // MARK: - 렌더링
 
     private func displayFrame(_ frame: VideoFrame) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         if let pixelBuffer = frame.pixelBuffer {
             let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
             let rep = NSCIImageRep(ciImage: ciImage)
@@ -247,6 +249,7 @@ final class PlayerView: NSView {
         } else if let cgImage = frame.cgImage {
             videoLayer.contents = cgImage
         }
+        CATransaction.commit()
     }
 
     private func updateTimeDisplay(current: Double, total: Double) {
@@ -330,23 +333,15 @@ final class PlayerView: NSView {
             } else {
                 controller.stop()
             }
-        case 27: // - (자막 싱크 뒤로)
+        case 27: // -
             controller.subtitleOffset -= 0.5
             log("자막 오프셋: \(controller.subtitleOffset)초")
-        case 24: // = (자막 싱크 앞으로)
+        case 24: // =
             controller.subtitleOffset += 0.5
             log("자막 오프셋: \(controller.subtitleOffset)초")
         default:
             super.keyDown(with: event)
         }
-    }
-
-    override func flagsChanged(with event: NSEvent) {
-        // Cmd+F 전체화면
-        if event.modifierFlags.contains(.command) {
-            // Cmd 키 감지 (F는 keyDown에서 처리)
-        }
-        super.flagsChanged(with: event)
     }
 
     private func adjustVolume(delta: Float) {
@@ -359,7 +354,41 @@ final class PlayerView: NSView {
         speedLabel.stringValue = String(format: "%.2fx", controller.playbackSpeed)
     }
 
-    // MARK: - 마우스
+    // MARK: - 마우스: 창 드래그 이동
+
+    override func mouseDown(with event: NSEvent) {
+        let locationInView = convert(event.locationInWindow, from: nil)
+
+        // 컨트롤 바 영역이면 창 드래그 안 함
+        if controlBar.frame.contains(locationInView) {
+            super.mouseDown(with: event)
+            return
+        }
+
+        // 비디오 영역 클릭 → 창 드래그 시작
+        isDraggingWindow = true
+        windowDragStart = event.locationInWindow
+        showControls()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if isDraggingWindow, let win = window {
+            let current = event.locationInWindow
+            let dx = current.x - windowDragStart.x
+            let dy = current.y - windowDragStart.y
+            var origin = win.frame.origin
+            origin.x += dx
+            origin.y += dy
+            win.setFrameOrigin(origin)
+        } else {
+            super.mouseDragged(with: event)
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        isDraggingWindow = false
+        super.mouseUp(with: event)
+    }
 
     override func scrollWheel(with event: NSEvent) {
         adjustVolume(delta: Float(event.deltaY) * 0.02)
@@ -398,11 +427,11 @@ final class PlayerView: NSView {
         window?.toggleFullScreen(nil)
     }
 
-    // MARK: - 드래그 앤 드롭
+    // MARK: - 드래그 앤 드롭 (파일)
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        let dominated = sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: nil)
-        return dominated ? .copy : []
+        let canRead = sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: nil)
+        return canRead ? .copy : []
     }
 
     override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
@@ -416,25 +445,18 @@ final class PlayerView: NSView {
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
         let pb = sender.draggingPasteboard
 
-        // 방법 1: readObjects
         if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL], let url = urls.first {
             openDroppedURL(url)
             return true
         }
-
-        // 방법 2: propertyList
-        if let files = pb.propertyList(forType: .fileURL) as? String,
-           let url = URL(string: files) {
+        if let files = pb.propertyList(forType: .fileURL) as? String, let url = URL(string: files) {
             openDroppedURL(url)
             return true
         }
-
-        // 방법 3: string 경로
         if let path = pb.string(forType: .string), FileManager.default.fileExists(atPath: path) {
             openDroppedURL(URL(fileURLWithPath: path))
             return true
         }
-
         return false
     }
 
@@ -469,33 +491,29 @@ final class SeekBar: NSView {
         didSet { needsDisplay = true }
     }
     var onSeek: ((Double) -> Void)?
+    private(set) var isSeeking = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
     }
 
-    required init?(coder: NSCoder) {
-        fatalError()
-    }
+    required init?(coder: NSCoder) { fatalError() }
 
     override func draw(_ dirtyRect: NSRect) {
         let bounds = self.bounds
         let trackHeight: CGFloat = 4
         let trackY = (bounds.height - trackHeight) / 2
 
-        // 트랙 배경
         NSColor.darkGray.setFill()
-        let trackRect = NSRect(x: 0, y: trackY, width: bounds.width, height: trackHeight)
-        NSBezierPath(roundedRect: trackRect, xRadius: 2, yRadius: 2).fill()
+        NSBezierPath(roundedRect: NSRect(x: 0, y: trackY, width: bounds.width, height: trackHeight),
+                     xRadius: 2, yRadius: 2).fill()
 
-        // 진행 바
         let progressWidth = bounds.width * CGFloat(progress)
         NSColor.systemBlue.setFill()
-        let progressRect = NSRect(x: 0, y: trackY, width: progressWidth, height: trackHeight)
-        NSBezierPath(roundedRect: progressRect, xRadius: 2, yRadius: 2).fill()
+        NSBezierPath(roundedRect: NSRect(x: 0, y: trackY, width: progressWidth, height: trackHeight),
+                     xRadius: 2, yRadius: 2).fill()
 
-        // 핸들
         let handleSize: CGFloat = 12
         let handleX = progressWidth - handleSize / 2
         let handleY = (bounds.height - handleSize) / 2
@@ -504,17 +522,26 @@ final class SeekBar: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        handleSeek(event)
+        isSeeking = true
+        handleSeek(event, commit: true)
     }
 
     override func mouseDragged(with event: NSEvent) {
-        handleSeek(event)
+        handleSeek(event, commit: false)
     }
 
-    private func handleSeek(_ event: NSEvent) {
+    override func mouseUp(with event: NSEvent) {
+        handleSeek(event, commit: true)
+        isSeeking = false
+    }
+
+    private func handleSeek(_ event: NSEvent, commit: Bool) {
         let location = convert(event.locationInWindow, from: nil)
         let fraction = max(0, min(1, Double(location.x / bounds.width)))
+        // seekbar를 즉시 업데이트
         progress = fraction
+        needsDisplay = true
+        // 실제 seek 수행 (드래그 중에도 수행하여 화면도 같이 전환)
         onSeek?(fraction)
     }
 }
