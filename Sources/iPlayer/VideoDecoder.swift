@@ -180,7 +180,7 @@ final class VideoDecoder {
     }
 }
 
-struct VideoFrame {
+struct VideoFrame: @unchecked Sendable {
     var pixelBuffer: CVPixelBuffer?
     var cgImage: CGImage?
     let pts: Double

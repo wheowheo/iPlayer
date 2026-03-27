@@ -5,15 +5,15 @@ final class AudioOutput {
     private var audioQueue: AudioQueueRef?
     private var buffers: [AudioQueueBufferRef?] = []
     private let bufferCount = 3
-    private let bufferSize = 8192 * 4 // enough for ~42ms at 48kHz stereo float32
+    private let bufferSize = 4096 * 4  // ~21ms at 48kHz stereo float32
 
-    private var ringBuffer = RingBuffer(capacity: 1024 * 1024) // 1MB ring buffer
+    private var ringBuffer = RingBuffer(capacity: 2 * 1024 * 1024) // 2MB
     private let lock = NSLock()
 
     var volume: Float = 1.0 {
         didSet {
             if let queue = audioQueue {
-                AudioQueueSetParameter(queue, kAudioQueueParam_Volume, Float32(volume))
+                AudioQueueSetParameter(queue, kAudioQueueParam_Volume, Float32(isMuted ? 0 : volume))
             }
         }
     }
@@ -25,11 +25,11 @@ final class AudioOutput {
         }
     }
 
-    // 현재 오디오 재생 시간 (A/V 싱크용)
     private(set) var currentPTS: Double = 0
-    private var basePTS: Double = 0
-    private var bytesWrittenSinceBase: Int = 0
-    private let bytesPerSecond: Double = 48000 * 2 * 4 // 48kHz * 2ch * float32
+    private var ptsQueue: [(byteOffset: Int, pts: Double)] = []
+    private var totalBytesConsumed: Int = 0
+    private var totalBytesWritten: Int = 0
+    private let bytesPerSecond: Double = 48000 * 2 * 4
 
     var playbackRate: Float = 1.0 {
         didSet {
@@ -44,7 +44,7 @@ final class AudioOutput {
             mSampleRate: 48000,
             mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-            mBytesPerPacket: 8,     // 2ch * 4bytes
+            mBytesPerPacket: 8,
             mFramesPerPacket: 1,
             mBytesPerFrame: 8,
             mChannelsPerFrame: 2,
@@ -55,7 +55,7 @@ final class AudioOutput {
         let callbackPointer = Unmanaged.passUnretained(self).toOpaque()
         let status = AudioQueueNewOutput(
             &format,
-            audioQueueCallback,
+            audioQueueOutputCallback,
             callbackPointer,
             nil, nil, 0,
             &audioQueue
@@ -66,34 +66,44 @@ final class AudioOutput {
             return false
         }
 
-        // 타임 피치 활성화 (배속 재생용)
-        AudioQueueSetParameter(queue, kAudioQueueParam_PlayRate, Float32(playbackRate))
+        // 배속 재생 지원
         var enableTimePitch: UInt32 = 1
         AudioQueueSetProperty(queue, kAudioQueueProperty_EnableTimePitch,
                               &enableTimePitch, UInt32(MemoryLayout<UInt32>.size))
+        AudioQueueSetParameter(queue, kAudioQueueParam_PlayRate, Float32(playbackRate))
+        AudioQueueSetParameter(queue, kAudioQueueParam_Volume, Float32(volume))
 
+        // 버퍼 할당 및 초기 enqueue (무음)
         for _ in 0..<bufferCount {
             var buffer: AudioQueueBufferRef?
             AudioQueueAllocateBuffer(queue, UInt32(bufferSize), &buffer)
             if let buffer = buffer {
-                buffer.pointee.mAudioDataByteSize = 0
+                memset(buffer.pointee.mAudioData, 0, bufferSize)
+                buffer.pointee.mAudioDataByteSize = UInt32(bufferSize)
                 buffers.append(buffer)
-                fillBuffer(buffer)
                 AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
             }
         }
 
-        AudioQueueSetParameter(queue, kAudioQueueParam_Volume, Float32(volume))
-        AudioQueueStart(queue, nil)
+        let startStatus = AudioQueueStart(queue, nil)
+        if startStatus != noErr {
+            log("[AudioOutput] AudioQueue 시작 실패: \(startStatus)")
+            return false
+        }
+
+        log("[AudioOutput] 시작됨")
         return true
     }
 
     func enqueue(buffer: AudioBuffer) {
         lock.lock()
-        if basePTS == 0 || abs(buffer.pts - currentPTS) > 1.0 {
-            basePTS = buffer.pts
-            bytesWrittenSinceBase = 0
+        // PTS 매핑 기록
+        ptsQueue.append((byteOffset: totalBytesWritten, pts: buffer.pts))
+        // 오래된 PTS 매핑 정리
+        while ptsQueue.count > 500 {
+            ptsQueue.removeFirst()
         }
+        totalBytesWritten += buffer.data.count
         ringBuffer.write(buffer.data)
         lock.unlock()
     }
@@ -112,8 +122,9 @@ final class AudioOutput {
         buffers.removeAll()
         lock.lock()
         ringBuffer.reset()
-        basePTS = 0
-        bytesWrittenSinceBase = 0
+        ptsQueue.removeAll()
+        totalBytesConsumed = 0
+        totalBytesWritten = 0
         currentPTS = 0
         lock.unlock()
     }
@@ -133,8 +144,9 @@ final class AudioOutput {
     func reset() {
         lock.lock()
         ringBuffer.reset()
-        basePTS = 0
-        bytesWrittenSinceBase = 0
+        ptsQueue.removeAll()
+        totalBytesConsumed = 0
+        totalBytesWritten = 0
         currentPTS = 0
         lock.unlock()
     }
@@ -149,18 +161,44 @@ final class AudioOutput {
             ringBuffer.read(into: ptr, count: toRead)
             buffer.pointee.mAudioDataByteSize = UInt32(toRead)
 
-            bytesWrittenSinceBase += toRead
-            currentPTS = basePTS + Double(bytesWrittenSinceBase) / bytesPerSecond
+            totalBytesConsumed += toRead
+
+            // PTS 보간: 현재 소비 바이트에 해당하는 PTS 계산
+            updateCurrentPTS()
         } else {
-            // 무음 채우기
+            // 데이터 없으면 무음
             memset(buffer.pointee.mAudioData, 0, bufferSize)
             buffer.pointee.mAudioDataByteSize = UInt32(bufferSize)
         }
         lock.unlock()
     }
+
+    private func updateCurrentPTS() {
+        // ptsQueue에서 현재 소비 위치에 가장 가까운 PTS 찾기
+        guard !ptsQueue.isEmpty else { return }
+
+        // 이미 지나간 PTS 항목들 중 마지막 것 찾기
+        var bestIdx = 0
+        for i in 0..<ptsQueue.count {
+            if ptsQueue[i].byteOffset <= totalBytesConsumed {
+                bestIdx = i
+            } else {
+                break
+            }
+        }
+
+        let entry = ptsQueue[bestIdx]
+        let bytesAfter = totalBytesConsumed - entry.byteOffset
+        currentPTS = entry.pts + Double(bytesAfter) / bytesPerSecond
+
+        // 사용 완료된 이전 항목 정리
+        if bestIdx > 0 {
+            ptsQueue.removeFirst(bestIdx)
+        }
+    }
 }
 
-private func audioQueueCallback(
+private func audioQueueOutputCallback(
     inUserData: UnsafeMutableRawPointer?,
     inAQ: AudioQueueRef,
     inBuffer: AudioQueueBufferRef
@@ -171,7 +209,7 @@ private func audioQueueCallback(
     AudioQueueEnqueueBuffer(inAQ, inBuffer, 0, nil)
 }
 
-// 간단한 링 버퍼
+// 링 버퍼
 final class RingBuffer {
     private var buffer: UnsafeMutablePointer<UInt8>
     private let capacity: Int
@@ -186,14 +224,11 @@ final class RingBuffer {
         self.buffer = .allocate(capacity: capacity)
     }
 
-    deinit {
-        buffer.deallocate()
-    }
+    deinit { buffer.deallocate() }
 
     func write(_ data: Data) {
         let toWrite = min(data.count, capacity - count)
         guard toWrite > 0 else { return }
-
         data.withUnsafeBytes { rawBuf in
             guard let src = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
             let firstPart = min(toWrite, capacity - writePos)
