@@ -72,6 +72,9 @@ final class PlayerController: @unchecked Sendable {
         var audioCodec: String = ""
         var width: Int32 = 0
         var height: Int32 = 0
+        var displayWidth: Int32 = 0
+        var displayHeight: Int32 = 0
+        var rotation: Double = 0
         var videoBitRate: Int64 = 0
         var audioBitRate: Int64 = 0
         var audioSampleRate: Int32 = 0
@@ -121,6 +124,7 @@ final class PlayerController: @unchecked Sendable {
 
     func play() {
         guard state != .playing else { return }
+        guard demuxer.formatCtx != nil else { return }
 
         if state == .idle || state == .stopped {
             // 오디오 출력 시작
@@ -178,6 +182,7 @@ final class PlayerController: @unchecked Sendable {
     }
 
     func seek(to seconds: Double) {
+        guard demuxer.formatCtx != nil else { return }
         let target = max(0, min(seconds, duration))
         isSeeking = true
 
@@ -204,6 +209,7 @@ final class PlayerController: @unchecked Sendable {
     }
 
     func stepFrame() {
+        guard demuxer.formatCtx != nil else { return }
         if state == .playing {
             pause()
         }
@@ -214,7 +220,7 @@ final class PlayerController: @unchecked Sendable {
         if let frame = videoFrameQueue.first {
             videoFrameQueue.removeFirst()
             queueLock.unlock()
-            currentTime = frame.pts
+            currentTime = min(frame.pts, duration)
             DispatchQueue.main.async { [weak self] in
                 self?.onFrameReady?(frame)
                 guard let self = self else { return }
@@ -252,6 +258,9 @@ final class PlayerController: @unchecked Sendable {
             info.videoCodec = v.stream.codecName
             info.width = v.width
             info.height = v.height
+            info.displayWidth = v.displayWidth
+            info.displayHeight = v.displayHeight
+            info.rotation = v.rotation
             info.videoBitRate = v.bitRate
             info.fps = av_q2d(v.frameRate)
         }
@@ -341,7 +350,16 @@ final class PlayerController: @unchecked Sendable {
         // 오디오 PTS를 마스터 클럭으로 (오디오가 없으면 비디오 PTS 사용)
         let audioClock = audioOutput.currentPTS
         if audioClock > 0 && demuxer.selectedAudioIndex >= 0 {
-            currentTime = audioClock
+            currentTime = min(audioClock, duration)
+        }
+
+        // 재생 시간이 전체 시간에 도달하면 정지
+        if duration > 0 && currentTime >= duration {
+            currentTime = duration
+            DispatchQueue.main.async { [weak self] in
+                self?.pause()
+            }
+            return
         }
 
         // FPS 카운터
@@ -379,7 +397,7 @@ final class PlayerController: @unchecked Sendable {
             renderedFrames += 1
             // 오디오가 없으면 비디오 PTS로 시간 진행
             if demuxer.selectedAudioIndex < 0 || audioOutput.currentPTS <= 0 {
-                currentTime = frame.pts
+                currentTime = min(frame.pts, duration)
             }
             DispatchQueue.main.async { [weak self] in
                 self?.onFrameReady?(frame)

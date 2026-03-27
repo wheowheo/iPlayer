@@ -23,13 +23,14 @@ final class PlayerView: NSView {
     private let infoOverlay = NSTextField(labelWithString: "")
     private var showInfo = false
     private var mediaInfo: PlayerController.MediaInfo?
+    private var videoRotation: Double = 0
 
     // 컨트롤 숨기기 타이머
     private var hideTimer: Timer?
     private var controlsVisible = true
 
     // 드래그 앤 드롭
-    private let supportedTypes: [NSPasteboard.PasteboardType] = [.fileURL]
+    private let supportedTypes: [NSPasteboard.PasteboardType] = [.fileURL, .URL, .string]
 
     init(controller: PlayerController) {
         self.controller = controller
@@ -154,14 +155,58 @@ final class PlayerView: NSView {
 
         controller.onMediaInfo = { [weak self] info in
             self?.mediaInfo = info
+            self?.applyVideoRotation(info.rotation)
         }
+    }
+
+    private func applyVideoRotation(_ rotation: Double) {
+        videoRotation = rotation
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if rotation == 0 {
+            videoLayer.transform = CATransform3DIdentity
+        } else {
+            let radians = rotation * .pi / 180.0
+            videoLayer.transform = CATransform3DMakeRotation(CGFloat(radians), 0, 0, 1)
+        }
+        CATransaction.commit()
+        needsLayout = true
     }
 
     override func layout() {
         super.layout()
 
         let bounds = self.bounds
-        videoLayer.frame = bounds
+        // rotation이 90/270도이면 레이어 크기를 뒤집어서 화면에 맞춤
+        if videoRotation == 90 || videoRotation == 270 {
+            // 세로 영상: 가로세로를 뒤집어서 aspect fit 계산
+            let videoAspect = CGFloat(mediaInfo?.height ?? 9) / CGFloat(mediaInfo?.width ?? 16)
+            let viewAspect = bounds.width / bounds.height
+            var layerWidth: CGFloat
+            var layerHeight: CGFloat
+            if videoAspect > viewAspect {
+                // 너비 기준
+                layerWidth = bounds.width
+                layerHeight = bounds.width / videoAspect
+            } else {
+                // 높이 기준
+                layerHeight = bounds.height
+                layerWidth = bounds.height * videoAspect
+            }
+            // 레이어는 회전 전 크기이므로 가로세로를 반대로 설정
+            let layerFrame = NSRect(
+                x: (bounds.width - layerWidth) / 2,
+                y: (bounds.height - layerHeight) / 2,
+                width: layerWidth,
+                height: layerHeight
+            )
+            videoLayer.frame = layerFrame
+            // 회전 후 레이어 내부의 content가 맞게 보이도록 bounds 조정
+            videoLayer.bounds = CGRect(x: 0, y: 0, width: layerHeight, height: layerWidth)
+        } else {
+            videoLayer.frame = bounds
+            videoLayer.bounds = CGRect(origin: .zero, size: bounds.size)
+        }
 
         // 컨트롤 바
         let barHeight: CGFloat = 50
@@ -234,9 +279,11 @@ final class PlayerView: NSView {
             return
         }
         let info = mediaInfo ?? PlayerController.MediaInfo()
+        let rotStr = info.rotation != 0 ? " (rot: \(Int(info.rotation))°)" : ""
         let text = """
         FPS: \(String(format: "%.1f", controller.currentFPS))
-        Video: \(info.videoCodec) \(info.width)x\(info.height)
+        Video: \(info.videoCodec) \(info.width)x\(info.height)\(rotStr)
+        Display: \(info.displayWidth)x\(info.displayHeight)
         Video Bitrate: \(info.videoBitRate / 1000) kbps
         Audio: \(info.audioCodec) \(info.audioSampleRate)Hz \(info.audioChannels)ch
         Audio Bitrate: \(info.audioBitRate / 1000) kbps
@@ -354,22 +401,50 @@ final class PlayerView: NSView {
     // MARK: - 드래그 앤 드롭
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        let dominated = sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: nil)
+        return dominated ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
         return .copy
     }
 
+    override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        return true
+    }
+
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
-        guard let items = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self]) as? [URL],
-              let url = items.first else {
-            return false
+        let pb = sender.draggingPasteboard
+
+        // 방법 1: readObjects
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL], let url = urls.first {
+            openDroppedURL(url)
+            return true
         }
 
+        // 방법 2: propertyList
+        if let files = pb.propertyList(forType: .fileURL) as? String,
+           let url = URL(string: files) {
+            openDroppedURL(url)
+            return true
+        }
+
+        // 방법 3: string 경로
+        if let path = pb.string(forType: .string), FileManager.default.fileExists(atPath: path) {
+            openDroppedURL(URL(fileURLWithPath: path))
+            return true
+        }
+
+        return false
+    }
+
+    private func openDroppedURL(_ url: URL) {
         let ext = url.pathExtension.lowercased()
         if ext == "srt" || ext == "smi" || ext == "smil" {
             controller.loadSubtitle(path: url.path)
         } else {
             controller.openFile(path: url.path)
         }
-        return true
     }
 
     // MARK: - 유틸

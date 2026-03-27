@@ -42,11 +42,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
 
         playerController = PlayerController()
         playerController.onMediaInfo = { [weak self] info in
-            guard let self = self, info.width > 0 && info.height > 0 else { return }
-            let ratio = CGFloat(info.width) / CGFloat(info.height)
+            guard let self = self, info.displayWidth > 0 && info.displayHeight > 0 else { return }
+            let ratio = CGFloat(info.displayWidth) / CGFloat(info.displayHeight)
             self.videoAspectRatio = ratio
             DispatchQueue.main.async {
                 self.window.aspectRatio = NSSize(width: ratio, height: 1.0)
+                // 세로 영상이면 창 크기를 세로로 맞춤
+                if info.rotation == 90 || info.rotation == 270 {
+                    let screenHeight = self.window.screen?.visibleFrame.height ?? 800
+                    let newHeight = min(CGFloat(info.displayHeight), screenHeight * 0.8)
+                    let newWidth = newHeight * ratio
+                    self.window.setContentSize(NSSize(width: newWidth, height: newHeight))
+                    self.window.center()
+                }
                 self.window.title = "iPlayer - \(URL(fileURLWithPath: self.playerController.filePath).lastPathComponent)"
             }
         }

@@ -17,6 +17,14 @@ struct VideoStreamInfo {
     let pixelFormat: AVPixelFormat
     let frameRate: AVRational
     let bitRate: Int64
+    let rotation: Double  // 회전 각도 (0, 90, 180, 270)
+    // rotation 적용 후 실제 표시 크기
+    var displayWidth: Int32 {
+        return (rotation == 90 || rotation == 270 || rotation == -90) ? height : width
+    }
+    var displayHeight: Int32 {
+        return (rotation == 90 || rotation == 270 || rotation == -90) ? width : height
+    }
 }
 
 struct AudioStreamInfo {
@@ -74,13 +82,15 @@ final class Demuxer {
 
             switch codecpar.codec_type {
             case AVMEDIA_TYPE_VIDEO:
+                let rotation = iplayer_get_stream_rotation(stream)
                 let vInfo = VideoStreamInfo(
                     stream: info,
                     width: codecpar.width,
                     height: codecpar.height,
                     pixelFormat: AVPixelFormat(rawValue: codecpar.format),
                     frameRate: av_guess_frame_rate(ctx, stream, nil),
-                    bitRate: codecpar.bit_rate
+                    bitRate: codecpar.bit_rate,
+                    rotation: rotation
                 )
                 videoStreams.append(vInfo)
                 if selectedVideoIndex < 0 { selectedVideoIndex = i }
