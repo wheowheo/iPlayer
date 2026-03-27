@@ -255,7 +255,11 @@ final class PlayerView: NSView {
         case 49: // Space
             controller.togglePlayPause()
         case 3: // F
-            controller.stepFrame()
+            if event.modifierFlags.contains(.command) {
+                window?.toggleFullScreen(nil)
+            } else {
+                controller.stepFrame()
+            }
         case 123: // ←
             controller.seekRelative(seconds: -5)
         case 124: // →

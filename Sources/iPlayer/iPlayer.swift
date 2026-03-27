@@ -1,5 +1,6 @@
 import AppKit
 import CFFmpeg
+import UniformTypeIdentifiers
 
 @main
 struct iPlayerApp {
@@ -17,9 +18,10 @@ struct iPlayerApp {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unchecked Sendable {
     var window: NSWindow!
     var playerController: PlayerController!
+    private var videoAspectRatio: CGFloat = 16.0 / 9.0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenu()
@@ -35,8 +37,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         window.center()
         window.minSize = NSSize(width: 480, height: 320)
         window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.aspectRatio = NSSize(width: 16, height: 9)
 
         playerController = PlayerController()
+        playerController.onMediaInfo = { [weak self] info in
+            guard let self = self, info.width > 0 && info.height > 0 else { return }
+            let ratio = CGFloat(info.width) / CGFloat(info.height)
+            self.videoAspectRatio = ratio
+            DispatchQueue.main.async {
+                self.window.aspectRatio = NSSize(width: ratio, height: 1.0)
+                self.window.title = "iPlayer - \(URL(fileURLWithPath: self.playerController.filePath).lastPathComponent)"
+            }
+        }
+
         let playerView = PlayerView(controller: playerController)
         window.contentView = playerView
         window.makeKeyAndOrderFront(nil)
@@ -44,7 +58,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         NSApp.activate(ignoringOtherApps: true)
 
-        // 명령줄 인자로 파일 열기
         let args = CommandLine.arguments
         if args.count > 1 {
             let path = args[1]
@@ -65,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     @MainActor private func setupMenu() {
         let mainMenu = NSMenu()
 
+        // App 메뉴
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "iPlayer 정보", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
@@ -73,11 +87,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
+        // 파일 메뉴
         let fileMenuItem = NSMenuItem()
         let fileMenu = NSMenu(title: "파일")
         fileMenu.addItem(withTitle: "열기...", action: #selector(openFileAction(_:)), keyEquivalent: "o")
+        fileMenu.addItem(withTitle: "자막 열기...", action: #selector(openSubtitleAction(_:)), keyEquivalent: "")
         fileMenuItem.submenu = fileMenu
         mainMenu.addItem(fileMenuItem)
+
+        // 재생 메뉴
+        let playMenuItem = NSMenuItem()
+        let playMenu = NSMenu(title: "재생")
+        playMenu.addItem(withTitle: "재생/일시정지", action: #selector(togglePlayAction(_:)), keyEquivalent: " ")
+        playMenu.addItem(withTitle: "정지", action: #selector(stopAction(_:)), keyEquivalent: "")
+        playMenu.addItem(NSMenuItem.separator())
+        playMenu.addItem(withTitle: "전체화면", action: #selector(toggleFullScreenAction(_:)), keyEquivalent: "f")
+        playMenu.items.last?.keyEquivalentModifierMask = .command
+        playMenuItem.submenu = playMenu
+        mainMenu.addItem(playMenuItem)
+
+        // 윈도우 메뉴
+        let windowMenuItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "윈도우")
+        windowMenu.addItem(withTitle: "최소화", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenuItem.submenu = windowMenu
+        mainMenu.addItem(windowMenuItem)
 
         NSApp.mainMenu = mainMenu
     }
@@ -91,5 +125,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         if panel.runModal() == .OK, let url = panel.url {
             playerController.openFile(path: url.path)
         }
+    }
+
+    @MainActor @objc func openSubtitleAction(_ sender: Any) {
+        let panel = NSOpenPanel()
+        panel.allowsOtherFileTypes = true
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+
+        if panel.runModal() == .OK, let url = panel.url {
+            playerController.loadSubtitle(path: url.path)
+        }
+    }
+
+    @objc func togglePlayAction(_ sender: Any) {
+        playerController?.togglePlayPause()
+    }
+
+    @objc func stopAction(_ sender: Any) {
+        playerController?.stop()
+    }
+
+    @MainActor @objc func toggleFullScreenAction(_ sender: Any) {
+        window?.toggleFullScreen(nil)
     }
 }

@@ -338,9 +338,9 @@ final class PlayerController: @unchecked Sendable {
     fileprivate func displayTick() {
         guard state == .playing, !isSeeking else { return }
 
-        // 오디오 PTS를 마스터 클럭으로
+        // 오디오 PTS를 마스터 클럭으로 (오디오가 없으면 비디오 PTS 사용)
         let audioClock = audioOutput.currentPTS
-        if audioClock > 0 {
+        if audioClock > 0 && demuxer.selectedAudioIndex >= 0 {
             currentTime = audioClock
         }
 
@@ -377,6 +377,10 @@ final class PlayerController: @unchecked Sendable {
 
         if let frame = frameToShow {
             renderedFrames += 1
+            // 오디오가 없으면 비디오 PTS로 시간 진행
+            if demuxer.selectedAudioIndex < 0 || audioOutput.currentPTS <= 0 {
+                currentTime = frame.pts
+            }
             DispatchQueue.main.async { [weak self] in
                 self?.onFrameReady?(frame)
             }

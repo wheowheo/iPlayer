@@ -26,3 +26,17 @@
 - GUI 앱에서 print()는 터미널에 출력 안됨 → fputs(stderr)로 로그 함수 분리
 - application(_:openFile:)이 applicationDidFinishLaunching 전에 호출될 수 있어 nil 체크 필요
 - CVPixelBuffer를 HW 디코딩에서 추출 시 retain 필요 (프레임 재사용으로 인한 dangling 방지)
+
+### 2026-03-27: Phase 3~7 통합 구현
+- 오디오 출력 (AudioQueue), A/V PTS 싱크, 볼륨 조절 모두 통합
+- 재생 제어 UI (컨트롤 바, 시크바, 재생/일시정지 버튼, 시간 표시)
+- 단축키 바인딩 완료 (Space, F, 방향키, Tab, M, [, ], Cmd+F 등)
+- Tab 정보 오버레이 (FPS, 코덱, 해상도, 디코딩 모드)
+- SRT/SMI 자막 파서 + PTS 기반 렌더링 + 싱크 조절 (-/= 키)
+- 드래그 앤 드롭 파일 열기 (비디오/자막 파일 자동 감지)
+- 전체화면 (Cmd+F, 더블클릭)
+- 창 비율 유지 (영상 가로세로비에 맞춤)
+- 자막 인코딩 자동 감지 (UTF-8, UTF-16, EUC-KR)
+- 자막 파일 자동 탐색 (비디오와 같은 이름)
+- 메뉴바에 파일/재생/윈도우 메뉴 추가
+- 비디오 전용(오디오 없는) 파일 재생 시 비디오 PTS 기반 클럭 폴백
