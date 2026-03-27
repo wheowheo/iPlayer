@@ -305,6 +305,7 @@ final class PlayerView: NSView {
         Decode: \(info.hwAccelerated ? "Hardware (VideoToolbox)" : "Software")
         Speed: \(String(format: "%.2fx", controller.playbackSpeed))
         Dropped: \(controller.droppedFrames) frames
+        A/V Drift: \(String(format: "%+.1f", controller.avSyncDrift * 1000))ms
         """
         infoOverlay.stringValue = text
         infoOverlay.isHidden = false

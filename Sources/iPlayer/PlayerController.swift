@@ -68,6 +68,9 @@ final class PlayerController: @unchecked Sendable {
     private var playbackStartPTS: Double = 0
     private var hasAudio: Bool = false
 
+    // 싱크 통계
+    private(set) var avSyncDrift: Double = 0  // 현재 A/V 드리프트 (초)
+
     struct MediaInfo {
         var videoCodec: String = ""
         var audioCodec: String = ""
@@ -362,16 +365,32 @@ final class PlayerController: @unchecked Sendable {
     // MARK: - Render Loop
 
     private func renderLoop() {
+        // 프레임 간격 계산 (fps 기반 동적 임계값)
+        var frameDuration: Double = 1.0 / 30.0  // 기본 30fps
+        if let v = demuxer.videoStreams.first {
+            let fps = av_q2d(v.frameRate)
+            if fps > 0 { frameDuration = 1.0 / fps }
+        }
+        // 드롭 임계값: 프레임 3개분 이상 늦으면 드롭
+        let dropThreshold = -frameDuration * 3
+        // 표시 임계값: 프레임 0.5개분 이내면 표시
+        let showThreshold = frameDuration * 0.5
+
+        var lastFramePTS: Double = -1
+        var uiUpdateCounter = 0
+
         while isRendering {
             guard state == .playing else {
                 Thread.sleep(forTimeInterval: 0.01)
                 continue
             }
 
-            // 마스터 클럭 계산
+            // === 마스터 클럭 계산 ===
+            // 전략: 오디오가 있으면 AudioQueue 레이턴시를 보상한 compensatedPTS 사용
+            //        오디오가 없으면 벽시계 기반 클럭
             let clock: Double
-            if hasAudio && audioOutput.currentPTS > 0 {
-                clock = audioOutput.currentPTS
+            if hasAudio && audioOutput.compensatedPTS > 0 {
+                clock = audioOutput.compensatedPTS
             } else {
                 let elapsed = (CACurrentMediaTime() - playbackStartWall) * Double(playbackSpeed)
                 clock = playbackStartPTS + elapsed
@@ -379,7 +398,7 @@ final class PlayerController: @unchecked Sendable {
             let masterClock = min(clock, duration)
             currentTime = masterClock
 
-            // EOF
+            // === EOF 감지 ===
             if duration > 0 && masterClock >= duration - 0.05 {
                 queueLock.lock()
                 let empty = videoFrameQueue.isEmpty
@@ -394,26 +413,35 @@ final class PlayerController: @unchecked Sendable {
                 }
             }
 
-            // 프레임 선택
+            // === 프레임 선택 (적응적 임계값) ===
             queueLock.lock()
             var frameToShow: VideoFrame?
 
             while let first = videoFrameQueue.first {
                 let diff = first.pts - masterClock
-                if diff < -0.1 {
+
+                if diff < dropThreshold {
+                    // 심하게 늦은 프레임: 드롭
                     videoFrameQueue.removeFirst()
                     droppedFrames += 1
-                } else if diff <= 0.02 {
+                } else if diff < -frameDuration {
+                    // 약간 늦은 프레임: 즉시 표시 (따라잡기)
+                    frameToShow = first
+                    videoFrameQueue.removeFirst()
+                    break
+                } else if diff <= showThreshold {
+                    // 적정 타이밍: 표시
                     frameToShow = first
                     videoFrameQueue.removeFirst()
                     break
                 } else {
+                    // 아직 이른 프레임: 대기
                     break
                 }
             }
             queueLock.unlock()
 
-            // FPS 측정
+            // === FPS 측정 ===
             let now = CACurrentMediaTime()
             if now - fpsTimerStart >= 1.0 {
                 currentFPS = Double(fpsCounter) / (now - fpsTimerStart)
@@ -424,26 +452,38 @@ final class PlayerController: @unchecked Sendable {
             if let frame = frameToShow {
                 renderedFrames += 1
                 fpsCounter += 1
+                lastFramePTS = frame.pts
+
+                // A/V 드리프트 측정
+                if hasAudio && audioOutput.compensatedPTS > 0 {
+                    avSyncDrift = frame.pts - audioOutput.compensatedPTS
+                }
+
                 DispatchQueue.main.async { [weak self] in
                     self?.onFrameReady?(frame)
                 }
             }
 
-            // UI 업데이트
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                self.onTimeUpdate?(self.currentTime, self.duration)
-                self.updateSubtitle()
+            // === UI 업데이트 (매 프레임마다 하면 과부하, 3프레임마다) ===
+            uiUpdateCounter += 1
+            if uiUpdateCounter >= 3 {
+                uiUpdateCounter = 0
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    self.onTimeUpdate?(self.currentTime, self.duration)
+                    self.updateSubtitle()
+                }
             }
 
-            // 슬립
+            // === 정밀 슬립 ===
             queueLock.lock()
             let sleepTime: Double
             if let next = videoFrameQueue.first {
-                let wait = next.pts - masterClock
-                sleepTime = max(0.001, min(wait * 0.7, 0.016))
+                let waitUntil = next.pts - masterClock
+                // 남은 시간의 60%만 슬립 (나머지는 스핀으로 정밀 타이밍)
+                sleepTime = max(0.0005, min(waitUntil * 0.6, frameDuration * 0.8))
             } else {
-                sleepTime = 0.003
+                sleepTime = 0.002
             }
             queueLock.unlock()
             Thread.sleep(forTimeInterval: sleepTime)
