@@ -156,7 +156,6 @@ final class PlayerView: NSView {
         seekBar.onSeek = { [weak self] fraction in
             guard let self = self else { return }
             let target = fraction * self.controller.duration
-            // seek 시 탐지 상태 초기화 (stale 결과 제거 + 진행 중 추론 무효화)
             if self.objectDetectionEnabled {
                 self.objectDetector.reset()
                 self.detectionLayer.detections = []

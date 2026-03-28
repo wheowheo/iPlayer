@@ -94,6 +94,7 @@ final class PlayerController: @unchecked Sendable {
     // seek 제어
     private var seekRequest: Double? = nil
     private let seekLock = NSLock()
+    private var seekTargetPTS: Double = -1  // seek 후 오디오 필터링용
 
     // 통계
     private(set) var droppedFrames: Int = 0
@@ -247,6 +248,7 @@ final class PlayerController: @unchecked Sendable {
         seekLock.lock()
         seekRequest = nil
         seekLock.unlock()
+        seekTargetPTS = -1
 
         currentTime = 0
         droppedFrames = 0
@@ -701,9 +703,13 @@ final class PlayerController: @unchecked Sendable {
             }
 
             if packet.pointee.stream_index == demuxer.selectedAudioIndex {
-                // 오디오는 항상 즉시 처리 (배압과 무관)
                 let buffers = audioDecoder.decode(packet: packet)
                 for buf in buffers {
+                    // seek 후: 타겟 이전 오디오를 버려 클럭 오염 방지
+                    if seekTargetPTS >= 0 {
+                        if buf.pts < seekTargetPTS - 0.5 { continue }
+                        seekTargetPTS = -1  // 타겟 도달, 필터 해제
+                    }
                     audioOutput.enqueue(buffer: buf)
                 }
                 var pkt: UnsafeMutablePointer<AVPacket>? = packet
@@ -864,6 +870,9 @@ final class PlayerController: @unchecked Sendable {
 
         // 패킷 큐 플러시 (잔여 flush 패킷 포함)
         flushPacketQueue()
+
+        // seek 타겟 이전 오디오를 필터링하기 위해 기록
+        seekTargetPTS = target
 
         demuxer.seek(to: target)
         videoDecoder.flush()

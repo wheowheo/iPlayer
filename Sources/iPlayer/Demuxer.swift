@@ -133,7 +133,7 @@ final class Demuxer {
     func seek(to seconds: Double) {
         guard let ctx = formatCtx else { return }
         let ts = Int64(seconds * Double(AV_TIME_BASE))
-        avformat_seek_file(ctx, -1, Int64.min, ts, Int64.max, 0)
+        av_seek_frame(ctx, -1, ts, AVSEEK_FLAG_BACKWARD)
     }
 
     func close() {
