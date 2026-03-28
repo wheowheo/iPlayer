@@ -3,14 +3,17 @@
 ## 프로젝트 개요
 macOS용 네이티브 비디오 플레이어. Swift + FFmpeg 8.1 기반.
 모든 로컬 비디오 포맷을 재생하며, 하드웨어 가속 디코딩을 우선 사용한다.
+AI 분석(8종), 카메라 입력, 3D 얼굴 합성을 지원한다.
 
 ## 기술 스택
 - **언어**: Swift 6.2
 - **UI**: AppKit (NSWindow, NSView, CALayer 기반 렌더링)
 - **디코딩**: FFmpeg 8.1 (libavcodec, libavformat, libavutil, libswscale, libswresample)
 - **하드웨어 가속**: VideoToolbox (H.264/H.265/VP9/AV1 HW 디코딩)
-- **오디오 출력**: AudioToolbox / AVAudioEngine
-- **객체 탐지**: CoreML + Vision (YOLOv3Tiny, ANE/GPU 하드웨어 가속)
+- **오디오 출력**: AudioToolbox (TimePitch 배속 지원)
+- **AI 분석**: CoreML + Vision (YOLOv8n, MiDaS, 내장 Vision API 5종)
+- **3D 렌더링**: SceneKit (FLAME 얼굴 메시 + 텍스처 매핑)
+- **카메라**: AVFoundation (AVCaptureSession 실시간 캡처)
 - **빌드**: Swift Package Manager
 
 ## 핵심 기능
@@ -24,46 +27,52 @@ macOS용 네이티브 비디오 플레이어. Swift + FFmpeg 8.1 기반.
 ### 2. 오디오 디코딩 및 출력
 - FFmpeg 오디오 디코더 사용
 - swresample로 PCM 변환 (Float32, 48kHz 기본)
-- AudioToolbox 또는 AVAudioEngine으로 출력
+- AudioToolbox TimePitch (Spectral 알고리즘) — 피치 보존 배속 재생
 - 볼륨 조절 (0~200%)
+- 채널별 레벨 미터 + PCM 파형 표시 (Tab)
 
 ### 3. A/V 동기화
 - PTS(Presentation Time Stamp) 기반 동기화
 - 오디오 클럭을 마스터로 사용
 - 비디오 프레임 드롭/대기로 싱크 유지
+- 오디오 스톨 감지 시 벽시계 자동 전환
 
 ### 4. 탐색(Seek)
-- Seekbar 클릭 시 PTS 기반 정확한 탐색
-- 키프레임 탐색 + 정밀 탐색 결합
+- `avformat_seek_file` 비디오 스트림 time_base 기반 정밀 탐색
+- seek 후 타겟 이전 오디오 필터링 (클럭 오염 방지)
+- `videoDecoderLock` — flush/decode 경합 방지
+- 배압 루프 내 seek 요청 즉시 탈출
 - 방향키 좌/우로 5초 단위 탐색
 
 ### 5. 재생 제어
 - 재생 / 일시정지 (Space)
 - 정지 (Esc - 처음으로 돌아감)
 - 배속 재생 (0.25x ~ 4.0x)
+- 고속 최적화: >2x 패킷 스킵, >3x 키프레임 전용 디코딩
+- 자원 부족 시 버퍼링 스피너 표시 + 오디오 일시정지 + 자동 재개
 - 프레임 단위 이동 (F키 - 1프레임 전진)
 
 ### 6. 단축키
-| 키 | 기능 |
-|---|---|
-| Space | 재생/일시정지 토글 |
-| F | 1프레임 전진 |
-| ← | 5초 뒤로 |
-| → | 5초 앞으로 |
-| ↑ | 볼륨 5% 증가 |
-| ↓ | 볼륨 5% 감소 |
-| [ | 배속 0.25x 감소 |
-| ] | 배속 0.25x 증가 |
-| Tab | 코덱/FPS 정보 오버레이 토글 |
-| M | 음소거 토글 |
-| O | 파일 열기 대화상자 |
-| R | 렌더 모드 전환 (CVDisplayLink ↔ Thread) |
-| D | 프레임 드롭 디버거 토글 |
-| 1 | 창 크기 50% (원본 해상도 기준) |
-| 2 | 창 크기 100% |
-| 3 | 창 크기 200% |
-| Cmd+F | 전체화면 토글 |
-| Esc | 전체화면 해제 / 재생 정지 |
+| 키 | 기능 | 카메라 모드 |
+|---|---|---|
+| Space | 재생/일시정지 토글 | 비활성 |
+| F | 1프레임 전진 | 비활성 |
+| ← | 5초 뒤로 | 비활성 |
+| → | 5초 앞으로 | 비활성 |
+| ↑ | 볼륨 5% 증가 | 비활성 |
+| ↓ | 볼륨 5% 감소 | 비활성 |
+| [ | 배속 0.25x 감소 | 비활성 |
+| ] | 배속 0.25x 증가 | 비활성 |
+| Tab | 정보 오버레이 + 리소스 모니터 + 오디오 미터 | **활성** |
+| M | 음소거 토글 | 비활성 |
+| O | 파일 열기 대화상자 | **활성** |
+| R | 렌더 모드 전환 (CVDisplayLink ↔ Thread) | 비활성 |
+| D | 프레임 드롭 디버거 토글 | 비활성 |
+| 1 | 창 크기 50% (원본 해상도 기준) | **활성** |
+| 2 | 창 크기 100% | **활성** |
+| 3 | 창 크기 200% | **활성** |
+| Cmd+F | 전체화면 토글 | **활성** |
+| Esc | 전체화면 해제 / 재생 정지 / 카메라 끄기 | **활성** |
 
 ### 7. 자막 지원
 - SRT 파싱 및 표시
@@ -72,20 +81,20 @@ macOS용 네이티브 비디오 플레이어. Swift + FFmpeg 8.1 기반.
 - 자막 싱크 조절 (+/- 키)
 
 ### 8. 정보 오버레이 (Tab)
-- 현재 FPS (실제 렌더링 FPS)
-- 비디오 코덱 이름 / 해상도 / 비트레이트
-- 오디오 코덱 이름 / 샘플레이트 / 채널 수
-- 현재 재생 시간 / 전체 시간
-- 디코딩 모드 (HW/SW)
-- 드롭 프레임 수
+- **좌상단**: 코덱/FPS/해상도/비트레이트/동기화 정보
+- **우상단**: 리소스 모니터 (메모리, 스레드, 열 상태, 프레임 큐, AI FPS)
+- **우하단**: 오디오 채널별 레벨 미터 + PCM 파형 오실로스코프
 
 ### 9. 카메라 입력
 - 우클릭 → "카메라 입력" → 카메라 장치 선택
-- AVFoundation AVCaptureSession 기반 실시간 캡처
+- AVFoundation AVCaptureSession 기반 실시간 캡처 (BGRA 32bit)
 - 내장/외장 카메라 자동 감지 및 선택
 - 파일 재생과 카메라 간 즉시 전환
-- AI 분석 7종 모델 카메라 피드에 동일하게 적용
-- 카메라 모드에서 seek/시간 UI 비활성
+- 카메라 모드에서 파일 전용 기능 전면 비활성화:
+  - 메뉴: 재생/정지, 자막, 배속, 볼륨, 오디오 트랙, 렌더 모드, 디버거
+  - 키보드: Space, F, ←→, ↑↓, [], M, -=, R, D
+  - UI: 컨트롤 바 전체 숨김
+- Esc로 카메라 끄기
 
 ### 10. 추가 기본 기능
 - 드래그 앤 드롭으로 파일 열기
@@ -96,28 +105,36 @@ macOS용 네이티브 비디오 플레이어. Swift + FFmpeg 8.1 기반.
 - 재생 완료 시 자동 정지
 - 트랙 선택 (다중 오디오/자막 트랙)
 
-### 10. AI 분석 (실시간, 7종)
+### 11. AI 분석 (실시간, 8종)
 - 우클릭 → "AI 분석" 서브메뉴에서 모드 선택
 - **CoreML 모델 (2종)**:
   - **객체 탐지 (YOLOv8n)**: COCO 80클래스, 바운딩 박스 + 레이블
   - **깊이 추정 (MiDaS)**: 단안 깊이맵 Turbo 컬러맵 히트맵
 - **Apple Vision 내장 (5종, 모델 파일 불필요)**:
   - **자세 추정 (Pose)**: 15관절 스켈레톤 + 관절점
-  - **얼굴 랜드마크**: 76포인트 얼굴 윤곽/눈/코/입 추적
+  - **얼굴 랜드마크**: 76포인트 + 표정 인식 7종 (웃음/놀람/찡그림/윙크 등)
   - **손 추적 (Hand)**: 21관절 × 최대 4손, 손가락별 컬러
   - **텍스트 인식 (OCR)**: 화면 내 텍스트 자동 인식 + 바운딩 박스
   - **인물 분리**: 시안 반투명 인물 마스크 세그멘테이션
-- CoreML + Vision 프레임워크 기반 (외부 의존성 없음)
-- ANE/GPU 하드웨어 가속, 비동기 파이프라인
-- 자원 경합 시 탐지 자동 보류 (비디오 우선)
+- **3D 얼굴 합성 (Face Swap)**:
+  - FLAME 2023 얼굴 모델 (5023 정점, 9976 삼각형) 내장
+  - SceneKit 3D 렌더링 (PBR 조명, 4x MSAA)
+  - 랜드마크 3포인트 정렬 (눈+코 → FLAME UV 매칭)
+  - 머리 포즈 추정 (roll/yaw/pitch) → 3D 원근 워핑
+  - .obj/.usdz 외부 3D 모델 로드 지원
+  - 2D 사진 → FLAME 메시 자동 텍스처 매핑
+- 자원 경합 시 탐지 자동 보류 (비디오 우선, 상태 배지 표시)
 - seek 시 결과 즉시 클리어 + seekGeneration으로 stale 추론 폐기
+- 카메라 피드에도 동일하게 적용
 
 ## AI 모델 관리
 - 내장 모델: `Sources/iPlayer/Resources/` 하위
   - `YOLOv8n.mlmodelc` (6.2MB) — 객체 탐지
   - `YOLOv3Tiny.mlmodelc` (34MB) — 객체 탐지 (폴백)
   - `MiDaSSmall.mlmodelc` (32MB) — 깊이 추정
-- Pose 모드는 Apple Vision 내장 `VNDetectHumanBodyPoseRequest` 사용 (모델 파일 없음)
+  - `flame_face.obj` (550KB) — FLAME 2023 3D 얼굴 메시 (정면 투영 UV)
+  - `face_mesh.obj` (218KB) — 절차적 3D 얼굴 메시 (폴백)
+- Pose/얼굴/손/OCR/인물분리 모드는 Apple Vision 내장 API (모델 파일 없음)
 - ONNX → CoreML 변환:
   ```bash
   pip install coremltools onnx2torch
@@ -129,8 +146,35 @@ macOS용 네이티브 비디오 플레이어. Swift + FFmpeg 8.1 기반.
   "
   xcrun coremlcompiler compile Model.mlpackage Sources/iPlayer/Resources/
   ```
+- FLAME 모델 변환 (pkl → obj):
+  ```python
+  import pickle, numpy as np
+  with open("flame2023_Open.pkl", "rb") as f:
+      model = pickle.load(f, encoding="latin1")
+  vertices = np.array(model["v_template"]).reshape(-1, 3)
+  faces = model["f"]
+  # 정면 투영 UV 생성
+  u = (vertices[:,0] - vertices[:,0].min()) / (vertices[:,0].max() - vertices[:,0].min())
+  v = (vertices[:,1] - vertices[:,1].min()) / (vertices[:,1].max() - vertices[:,1].min())
+  ```
 - 새 모델 추가 시 `Package.swift`의 `resources`에 `.copy()` 항목 추가
 - `ObjectDetector.swift`의 `DetectorMode` enum에 새 케이스 추가
+
+## 3D 얼굴 합성 파이프라인
+1. **참조 이미지 로드** → Vision 랜드마크 추출 (눈/코/입 위치)
+2. **3포인트 정렬** → 눈 간 거리(수평) + 눈→코 거리(수직) 스케일 계산 → FLAME UV에 매칭
+3. **정렬 텍스처 생성** → CIImage 아핀 변환 (회전+스케일+이동) → 1024x1024 크롭
+4. **FLAME 메시 매핑** → SceneKit에서 텍스처 적용 (Phong 조명)
+5. **머리 포즈 추정** → 비디오 프레임의 눈/코 위치에서 roll/yaw/pitch 계산
+6. **3D 렌더링** → SceneKit eulerAngles 회전 → 512x512 MSAA 렌더
+7. **합성** → 비디오 얼굴 bbox 확장 (+35% 상, +15% 하/좌/우) → 타원 마스크 블렌딩
+
+## 배속 최적화 전략
+| 배속 | 비디오 디코딩 | 배압 | 프레임 선택 |
+|------|------------|------|-----------|
+| ≤2.0x | 모든 프레임 | 대기 | 정밀 동기화 |
+| 2.0~3.0x | 2프레임 중 1프레임 스킵 | 드롭 (>2.5x) | 가장 가까운 프레임 |
+| >3.0x | 키프레임만 | 드롭 | 가장 가까운 프레임 |
 
 ## 빌드 방법
 ```bash
