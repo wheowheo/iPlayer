@@ -115,6 +115,14 @@ final class PlayerController: @unchecked Sendable {
     // 싱크 통계
     private(set) var avSyncDrift: Double = 0
 
+    /// 프레임 큐 깊이 (외부에서 자원 경합 판단용)
+    var frameQueueDepth: Int {
+        queueLock.lock()
+        let d = frameRing.count
+        queueLock.unlock()
+        return d
+    }
+
     // UI 업데이트 카운터
     private var uiUpdateCounter = 0
 

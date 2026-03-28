@@ -156,6 +156,11 @@ final class PlayerView: NSView {
         seekBar.onSeek = { [weak self] fraction in
             guard let self = self else { return }
             let target = fraction * self.controller.duration
+            // seek 시 탐지 상태 초기화 (stale 결과 제거 + 진행 중 추론 무효화)
+            if self.objectDetectionEnabled {
+                self.objectDetector.reset()
+                self.detectionLayer.detections = []
+            }
             self.controller.seek(to: target)
         }
         controlBar.addSubview(seekBar)
@@ -328,13 +333,21 @@ final class PlayerView: NSView {
         CATransaction.setDisableActions(true)
         if let pixelBuffer = frame.pixelBuffer {
             videoLayer.contents = pixelBuffer
-            if objectDetectionEnabled { objectDetector.processFrame(pixelBuffer) }
+            if objectDetectionEnabled && !seekBar.isSeeking {
+                let qd = controller.frameQueueDepth
+                objectDetector.processFrame(pixelBuffer, queueDepth: qd)
+            }
         } else if let cgImage = frame.cgImage {
             videoLayer.contents = cgImage
-            if objectDetectionEnabled { objectDetector.processFrame(cgImage) }
+            if objectDetectionEnabled && !seekBar.isSeeking {
+                let qd = controller.frameQueueDepth
+                objectDetector.processFrame(cgImage, queueDepth: qd)
+            }
         }
         if objectDetectionEnabled {
             detectionLayer.detections = objectDetector.latestResults
+            detectionLayer.detectionState = objectDetector.state
+            detectionLayer.detectionFPS = objectDetector.detectionFPS
         }
         CATransaction.commit()
     }
