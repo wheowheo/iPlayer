@@ -78,13 +78,19 @@ final class FaceRenderer3D {
     }
 
     private func findBuiltInMesh() -> URL? {
+        // FLAME 우선, 없으면 절차적 메시 폴백
+        let names = ["flame_face", "face_mesh"]
         let execURL = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
         if let bundle = Bundle(url: execURL.appendingPathComponent("iPlayer_iPlayer.bundle")) {
-            if let url = bundle.url(forResource: "face_mesh", withExtension: "obj") { return url }
+            for name in names {
+                if let url = bundle.url(forResource: name, withExtension: "obj") { return url }
+            }
         }
         let srcRes = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Resources")
-        let url = srcRes.appendingPathComponent("face_mesh.obj")
-        if FileManager.default.fileExists(atPath: url.path) { return url }
+        for name in names {
+            let url = srcRes.appendingPathComponent("\(name).obj")
+            if FileManager.default.fileExists(atPath: url.path) { return url }
+        }
         return nil
     }
 
