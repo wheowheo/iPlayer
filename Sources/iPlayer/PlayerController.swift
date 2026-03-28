@@ -663,17 +663,9 @@ final class PlayerController: @unchecked Sendable {
                 continue
             }
 
-            // 패킷 큐 배압 제어
-            if videoPacketQueueSize > maxPacketQueueSize {
-                dropDebugger.recordBackpressure()
-                Thread.sleep(forTimeInterval: 0.002)
-                continue
-            }
-
             guard let packet = demuxer.readPacket() else {
-                // EOF: 디코더에 flush 신호 전송 (null 패킷)
+                // EOF: 디코더에 flush 신호 전송
                 demuxEOF = true
-                // flush 패킷을 큐에 넣어 디코더가 잔여 프레임을 출력하게 함
                 let flushPkt = av_packet_alloc()!
                 flushPkt.pointee.data = nil
                 flushPkt.pointee.size = 0
@@ -685,15 +677,21 @@ final class PlayerController: @unchecked Sendable {
                 continue
             }
 
-            if packet.pointee.stream_index == demuxer.selectedVideoIndex {
-                enqueueVideoPacket(packet)
-                var pkt: UnsafeMutablePointer<AVPacket>? = packet
-                av_packet_free(&pkt)
-            } else if packet.pointee.stream_index == demuxer.selectedAudioIndex {
+            if packet.pointee.stream_index == demuxer.selectedAudioIndex {
+                // 오디오는 항상 즉시 처리 (배압과 무관)
                 let buffers = audioDecoder.decode(packet: packet)
                 for buf in buffers {
                     audioOutput.enqueue(buffer: buf)
                 }
+                var pkt: UnsafeMutablePointer<AVPacket>? = packet
+                av_packet_free(&pkt)
+            } else if packet.pointee.stream_index == demuxer.selectedVideoIndex {
+                // 비디오 패킷 큐 배압: 꽉 차면 대기 (하지만 패킷은 버리지 않음)
+                while isDemuxing && videoPacketQueueSize > maxPacketQueueSize {
+                    dropDebugger.recordBackpressure()
+                    Thread.sleep(forTimeInterval: 0.002)
+                }
+                enqueueVideoPacket(packet)
                 var pkt: UnsafeMutablePointer<AVPacket>? = packet
                 av_packet_free(&pkt)
             } else {

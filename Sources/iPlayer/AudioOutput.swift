@@ -7,7 +7,7 @@ final class AudioOutput {
     private let bufferCount = 3
     private let bufferSize = 4096 * 4  // ~21ms at 48kHz stereo float32
 
-    private var ringBuffer = RingBuffer(capacity: 2 * 1024 * 1024)
+    private var ringBuffer = RingBuffer(capacity: 8 * 1024 * 1024)
     private let lock = NSLock()
 
     var volume: Float = 1.0 {
@@ -109,6 +109,16 @@ final class AudioOutput {
     }
 
     func enqueue(buffer: AudioBuffer) {
+        // 링버퍼에 공간이 부족하면 대기 (데이터 유실 방지)
+        let needed = buffer.data.count
+        for _ in 0..<100 {
+            lock.lock()
+            let free = ringBuffer.freeBytes
+            lock.unlock()
+            if free >= needed { break }
+            Thread.sleep(forTimeInterval: 0.005)
+        }
+
         lock.lock()
         ptsQueue.append((byteOffset: totalBytesWritten, pts: buffer.pts))
         while ptsQueue.count > 500 {
@@ -230,6 +240,7 @@ final class RingBuffer {
     private var count = 0
 
     var availableBytes: Int { return count }
+    var freeBytes: Int { return capacity - count }
 
     init(capacity: Int) {
         self.capacity = capacity
