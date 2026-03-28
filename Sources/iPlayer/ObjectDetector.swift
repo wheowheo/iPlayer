@@ -119,8 +119,8 @@ final class ObjectDetector: @unchecked Sendable {
         guard frameSkipCounter >= skipInterval else { return }
         frameSkipCounter = 0
 
-        guard let safeCopy = copyPixelBuffer(pixelBuffer) else { return }
-
+        // CVPixelBuffer는 Swift ARC가 retain — 복사 없이 안전하게 전달
+        // (seek 시 videoDecoderLock이 디코더 경합을 방지)
         isBusy = true
         state = .detecting
         let gen = seekGeneration
@@ -128,7 +128,7 @@ final class ObjectDetector: @unchecked Sendable {
             guard let self = self else { return }
             defer { self.isBusy = false }
             guard gen == self.seekGeneration else { return }
-            self.runInference(on: safeCopy)
+            self.runInference(on: pixelBuffer)
             self.measureFPS()
         }
     }
@@ -236,50 +236,6 @@ final class ObjectDetector: @unchecked Sendable {
             fpsCounter = 0
             fpsTimerStart = now
         }
-    }
-
-    /// CVPixelBuffer를 독립된 복사본으로 생성
-    private func copyPixelBuffer(_ source: CVPixelBuffer) -> CVPixelBuffer? {
-        let width = CVPixelBufferGetWidth(source)
-        let height = CVPixelBufferGetHeight(source)
-        let pixelFormat = CVPixelBufferGetPixelFormatType(source)
-
-        var copy: CVPixelBuffer?
-        let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height, pixelFormat, nil, &copy)
-        guard status == kCVReturnSuccess, let dst = copy else { return nil }
-
-        CVPixelBufferLockBaseAddress(source, .readOnly)
-        CVPixelBufferLockBaseAddress(dst, [])
-        defer {
-            CVPixelBufferUnlockBaseAddress(source, .readOnly)
-            CVPixelBufferUnlockBaseAddress(dst, [])
-        }
-
-        let planeCount = CVPixelBufferGetPlaneCount(source)
-        if planeCount > 0 {
-            for plane in 0..<planeCount {
-                guard let srcAddr = CVPixelBufferGetBaseAddressOfPlane(source, plane),
-                      let dstAddr = CVPixelBufferGetBaseAddressOfPlane(dst, plane) else { continue }
-                let srcStride = CVPixelBufferGetBytesPerRowOfPlane(source, plane)
-                let dstStride = CVPixelBufferGetBytesPerRowOfPlane(dst, plane)
-                let h = CVPixelBufferGetHeightOfPlane(source, plane)
-                let rowBytes = min(srcStride, dstStride)
-                for row in 0..<h {
-                    memcpy(dstAddr + row * dstStride, srcAddr + row * srcStride, rowBytes)
-                }
-            }
-        } else {
-            guard let srcAddr = CVPixelBufferGetBaseAddress(source),
-                  let dstAddr = CVPixelBufferGetBaseAddress(dst) else { return nil }
-            let srcStride = CVPixelBufferGetBytesPerRow(source)
-            let dstStride = CVPixelBufferGetBytesPerRow(dst)
-            let rowBytes = min(srcStride, dstStride)
-            for row in 0..<height {
-                memcpy(dstAddr + row * dstStride, srcAddr + row * srcStride, rowBytes)
-            }
-        }
-
-        return dst
     }
 
     private func findModelURL() -> URL? {
