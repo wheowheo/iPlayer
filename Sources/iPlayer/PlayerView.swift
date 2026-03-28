@@ -360,6 +360,7 @@ final class PlayerView: NSView {
             detectionLayer.detections = objectDetector.latestResults
             detectionLayer.detectionState = objectDetector.state
             detectionLayer.detectionFPS = objectDetector.detectionFPS
+            detectionLayer.hideStatusBadge = showInfo
         }
         CATransaction.commit()
     }

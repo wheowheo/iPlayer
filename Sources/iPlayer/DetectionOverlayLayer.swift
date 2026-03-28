@@ -14,6 +14,11 @@ final class DetectionOverlayLayer: CALayer {
         didSet { setNeedsDisplay() }
     }
 
+    /// TAB 오버레이가 켜져 있으면 상태 배지를 숨김 (중복 방지)
+    var hideStatusBadge = false {
+        didSet { setNeedsDisplay() }
+    }
+
     override init() {
         super.init()
         isOpaque = false
@@ -74,8 +79,10 @@ final class DetectionOverlayLayer: CALayer {
             NSGraphicsContext.restoreGraphicsState()
         }
 
-        // 상태 배지 (좌측 상단)
-        drawStatusBadge(in: ctx, bounds: bounds)
+        // 상태 배지 (TAB 오버레이와 겹치지 않을 때만 표시)
+        if !hideStatusBadge {
+            drawStatusBadge(in: ctx, bounds: bounds)
+        }
     }
 
     private func drawStatusBadge(in ctx: CGContext, bounds: CGRect) {
