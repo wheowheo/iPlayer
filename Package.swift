@@ -52,6 +52,7 @@ let package = Package(
                 .linkedFramework("Security"),
                 .linkedFramework("CoreML"),
                 .linkedFramework("Vision"),
+                .linkedFramework("AVFoundation"),
             ]
         ),
     ]

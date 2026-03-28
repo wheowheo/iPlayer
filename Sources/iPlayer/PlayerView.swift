@@ -383,16 +383,17 @@ final class PlayerView: NSView {
     private func displayFrame(_ frame: VideoFrame) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        let isCamera = controller.inputSource == .camera
+        let qd = isCamera ? 100 : controller.frameQueueDepth
+
         if let pixelBuffer = frame.pixelBuffer {
             videoLayer.contents = pixelBuffer
-            if objectDetectionEnabled && !seekBar.isSeeking {
-                let qd = controller.frameQueueDepth
+            if objectDetectionEnabled && (isCamera || !seekBar.isSeeking) {
                 objectDetector.processFrame(pixelBuffer, queueDepth: qd)
             }
         } else if let cgImage = frame.cgImage {
             videoLayer.contents = cgImage
-            if objectDetectionEnabled && !seekBar.isSeeking {
-                let qd = controller.frameQueueDepth
+            if objectDetectionEnabled && (isCamera || !seekBar.isSeeking) {
                 objectDetector.processFrame(cgImage, queueDepth: qd)
             }
         }
@@ -868,6 +869,34 @@ final class PlayerView: NSView {
         let subItem = NSMenuItem(title: "자막 열기...", action: #selector(AppDelegate.openSubtitleAction(_:)), keyEquivalent: "")
         menu.addItem(subItem)
 
+        // 카메라 입력
+        let camMenu = NSMenu()
+        let cameras = CameraController.availableCameras()
+        if cameras.isEmpty {
+            let noItem = NSMenuItem(title: "(카메라 없음)", action: nil, keyEquivalent: "")
+            noItem.isEnabled = false
+            camMenu.addItem(noItem)
+        } else {
+            for cam in cameras {
+                let item = NSMenuItem(title: cam.localizedName, action: #selector(contextStartCamera(_:)), keyEquivalent: "")
+                item.representedObject = cam.uniqueID
+                item.target = self
+                if controller.inputSource == .camera && controller.cameraController.currentDeviceName == cam.localizedName {
+                    item.state = .on
+                }
+                camMenu.addItem(item)
+            }
+        }
+        if controller.inputSource == .camera {
+            camMenu.addItem(NSMenuItem.separator())
+            let stopCam = NSMenuItem(title: "카메라 끄기", action: #selector(contextStopCamera), keyEquivalent: "")
+            stopCam.target = self
+            camMenu.addItem(stopCam)
+        }
+        let camMenuItem = NSMenuItem(title: "카메라 입력", action: nil, keyEquivalent: "")
+        camMenuItem.submenu = camMenu
+        menu.addItem(camMenuItem)
+
         menu.addItem(NSMenuItem.separator())
 
         // 배속
@@ -1004,6 +1033,15 @@ final class PlayerView: NSView {
 
     @objc private func contextPlayPause() { playOrResume() }
     @objc private func contextStop() { controller.stop() }
+
+    @objc private func contextStartCamera(_ sender: NSMenuItem) {
+        let deviceID = sender.representedObject as? String
+        controller.startCamera(deviceID: deviceID)
+    }
+
+    @objc private func contextStopCamera() {
+        controller.stopCamera()
+    }
 
     @objc private func contextSetSpeed(_ sender: NSMenuItem) {
         let speed = Float(sender.tag) / 100.0

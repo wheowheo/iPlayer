@@ -16,6 +16,11 @@ enum RenderMode: String {
     case thread = "Thread"
 }
 
+enum InputSource {
+    case file
+    case camera
+}
+
 final class PlayerController: @unchecked Sendable {
     let demuxer = Demuxer()
     let videoDecoder = VideoDecoder()
@@ -47,7 +52,12 @@ final class PlayerController: @unchecked Sendable {
     var onStateChange: ((PlaybackState) -> Void)?
     var onMediaInfo: ((MediaInfo) -> Void)?
     var onRenderModeChange: ((RenderMode) -> Void)?
-    var onBuffering: ((Bool) -> Void)?  // true=버퍼링 시작, false=버퍼링 종료
+    var onBuffering: ((Bool) -> Void)?
+    var onInputSourceChange: ((InputSource) -> Void)?
+
+    // 입력 소스
+    private(set) var inputSource: InputSource = .file
+    let cameraController = CameraController()
 
     // 버퍼링 상태
     private(set) var isBuffering = false
@@ -240,6 +250,10 @@ final class PlayerController: @unchecked Sendable {
     }
 
     func stop() {
+        if inputSource == .camera {
+            stopCamera()
+            return
+        }
         stopRenderer()
         stopDecodeThread()
         stopDemuxThread()
@@ -342,6 +356,50 @@ final class PlayerController: @unchecked Sendable {
 
     func toggleRenderMode() {
         renderMode = (renderMode == .displayLink) ? .thread : .displayLink
+    }
+
+    // MARK: - 카메라 입력
+
+    func startCamera(deviceID: String? = nil) {
+        stop()
+        inputSource = .camera
+
+        cameraController.onFrameReady = { [weak self] pixelBuffer, w, h in
+            guard let self = self else { return }
+            nonisolated(unsafe) let buf = pixelBuffer
+            DispatchQueue.main.async {
+                let frame = VideoFrame(pixelBuffer: buf, pts: CACurrentMediaTime(),
+                                       width: w, height: h)
+                self.onFrameReady?(frame)
+            }
+        }
+
+        guard cameraController.start(deviceID: deviceID) else {
+            inputSource = .file
+            return
+        }
+
+        state = .playing
+        onStateChange?(state)
+        onInputSourceChange?(.camera)
+
+        let info = MediaInfo(
+            videoCodec: "Camera",
+            width: 1920, height: 1080,
+            displayWidth: 1920, displayHeight: 1080,
+            hwAccelerated: true, duration: 0
+        )
+        DispatchQueue.main.async { [weak self] in
+            self?.onMediaInfo?(info)
+        }
+    }
+
+    func stopCamera() {
+        cameraController.stop()
+        inputSource = .file
+        state = .stopped
+        onStateChange?(state)
+        onInputSourceChange?(.file)
     }
 
     // MARK: - 프레임 타이밍
