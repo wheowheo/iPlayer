@@ -19,6 +19,8 @@ let package = Package(
             dependencies: ["CFFmpeg"],
             resources: [
                 .copy("Resources/YOLOv3Tiny.mlmodelc"),
+                .copy("Resources/YOLOv8n.mlmodelc"),
+                .copy("Resources/MiDaSSmall.mlmodelc"),
             ],
             swiftSettings: [
                 .unsafeFlags([

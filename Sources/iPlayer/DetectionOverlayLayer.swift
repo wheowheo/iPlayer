@@ -2,7 +2,7 @@ import QuartzCore
 import AppKit
 
 final class DetectionOverlayLayer: CALayer {
-    var detections: [DetectedObject] = [] {
+    var result: DetectionResult = .empty {
         didSet { setNeedsDisplay() }
     }
 
@@ -14,7 +14,10 @@ final class DetectionOverlayLayer: CALayer {
         didSet { setNeedsDisplay() }
     }
 
-    /// TAB 오버레이가 켜져 있으면 상태 배지를 숨김 (중복 방지)
+    var activeMode: DetectorMode = .objectDetection {
+        didSet { setNeedsDisplay() }
+    }
+
     var hideStatusBadge = false {
         didSet { setNeedsDisplay() }
     }
@@ -28,10 +31,12 @@ final class DetectionOverlayLayer: CALayer {
 
     override init(layer: Any) {
         super.init(layer: layer)
-        if let other = layer as? DetectionOverlayLayer {
-            detections = other.detections
-            detectionState = other.detectionState
-            detectionFPS = other.detectionFPS
+        if let o = layer as? DetectionOverlayLayer {
+            result = o.result
+            detectionState = o.detectionState
+            detectionFPS = o.detectionFPS
+            activeMode = o.activeMode
+            hideStatusBadge = o.hideStatusBadge
         }
     }
 
@@ -41,15 +46,32 @@ final class DetectionOverlayLayer: CALayer {
         let bounds = self.bounds
         guard !bounds.isEmpty else { return }
 
-        // 바운딩 박스
-        for det in detections {
+        switch result {
+        case .objects(let objects):
+            drawObjects(objects, in: ctx, bounds: bounds)
+        case .poses(let poses):
+            drawPoses(poses, in: ctx, bounds: bounds)
+        case .depthMap(let image):
+            drawDepth(image, in: ctx, bounds: bounds)
+        case .empty:
+            break
+        }
+
+        if !hideStatusBadge {
+            drawStatusBadge(in: ctx, bounds: bounds)
+        }
+    }
+
+    // MARK: - 객체 탐지 (바운딩 박스)
+
+    private func drawObjects(_ objects: [DetectedObject], in ctx: CGContext, bounds: CGRect) {
+        for det in objects {
             let rect = CGRect(
                 x: det.boundingBox.origin.x * bounds.width,
                 y: det.boundingBox.origin.y * bounds.height,
                 width: det.boundingBox.width * bounds.width,
                 height: det.boundingBox.height * bounds.height
             )
-
             let color = colorForLabel(det.label)
 
             ctx.setStrokeColor(color.cgColor)
@@ -63,12 +85,7 @@ final class DetectionOverlayLayer: CALayer {
             ]
             let attrStr = NSAttributedString(string: label, attributes: attrs)
             let textSize = attrStr.size()
-            let labelRect = CGRect(
-                x: rect.minX,
-                y: rect.maxY,
-                width: textSize.width + 8,
-                height: textSize.height + 4
-            )
+            let labelRect = CGRect(x: rect.minX, y: rect.maxY, width: textSize.width + 8, height: textSize.height + 4)
 
             ctx.setFillColor(color.withAlphaComponent(0.75).cgColor)
             ctx.fill(labelRect)
@@ -78,12 +95,48 @@ final class DetectionOverlayLayer: CALayer {
             attrStr.draw(at: CGPoint(x: labelRect.minX + 4, y: labelRect.minY + 2))
             NSGraphicsContext.restoreGraphicsState()
         }
+    }
 
-        // 상태 배지 (TAB 오버레이와 겹치지 않을 때만 표시)
-        if !hideStatusBadge {
-            drawStatusBadge(in: ctx, bounds: bounds)
+    // MARK: - 자세 추정 (스켈레톤)
+
+    private func drawPoses(_ poses: [PoseResult], in ctx: CGContext, bounds: CGRect) {
+        for pose in poses {
+            // 연결선
+            ctx.setStrokeColor(NSColor.systemGreen.cgColor)
+            ctx.setLineWidth(3.0)
+            ctx.setLineCap(.round)
+            for (fi, ti) in pose.connections {
+                let from = pose.joints[fi]
+                let to = pose.joints[ti]
+                let p1 = CGPoint(x: from.location.x * bounds.width, y: from.location.y * bounds.height)
+                let p2 = CGPoint(x: to.location.x * bounds.width, y: to.location.y * bounds.height)
+                ctx.move(to: p1)
+                ctx.addLine(to: p2)
+            }
+            ctx.strokePath()
+
+            // 관절 포인트
+            for joint in pose.joints where joint.confidence > 0.1 {
+                let pt = CGPoint(x: joint.location.x * bounds.width, y: joint.location.y * bounds.height)
+                let r: CGFloat = 5
+                let circle = CGRect(x: pt.x - r, y: pt.y - r, width: r * 2, height: r * 2)
+
+                ctx.setFillColor(NSColor.systemYellow.cgColor)
+                ctx.fillEllipse(in: circle)
+                ctx.setStrokeColor(NSColor.white.cgColor)
+                ctx.setLineWidth(1.5)
+                ctx.strokeEllipse(in: circle)
+            }
         }
     }
+
+    // MARK: - 깊이 추정 (히트맵)
+
+    private func drawDepth(_ image: CGImage, in ctx: CGContext, bounds: CGRect) {
+        ctx.draw(image, in: bounds)
+    }
+
+    // MARK: - 상태 배지
 
     private func drawStatusBadge(in ctx: CGContext, bounds: CGRect) {
         let text: String
@@ -91,10 +144,10 @@ final class DetectionOverlayLayer: CALayer {
 
         switch detectionState {
         case .idle:
-            return  // 비활성 시 배지 없음
+            return
         case .detecting:
             let fpsStr = detectionFPS > 0 ? String(format: " %.0f fps", detectionFPS) : ""
-            text = "● 탐지 중\(fpsStr)"
+            text = "● \(activeMode.rawValue)\(fpsStr)"
             badgeColor = NSColor.systemGreen
         case .deferred:
             text = "◐ 탐지 대기"
@@ -102,24 +155,16 @@ final class DetectionOverlayLayer: CALayer {
         }
 
         let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: badgeColor
-        ]
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: badgeColor]
         let attrStr = NSAttributedString(string: text, attributes: attrs)
         let textSize = attrStr.size()
 
         let pad: CGFloat = 6
-        let badgeRect = CGRect(
-            x: pad,
-            y: bounds.height - textSize.height - pad * 2,
-            width: textSize.width + pad * 2,
-            height: textSize.height + pad
-        )
+        let badgeRect = CGRect(x: pad, y: bounds.height - textSize.height - pad * 2,
+                               width: textSize.width + pad * 2, height: textSize.height + pad)
 
         ctx.setFillColor(NSColor.black.withAlphaComponent(0.6).cgColor)
-        let path = CGPath(roundedRect: badgeRect, cornerWidth: 4, cornerHeight: 4, transform: nil)
-        ctx.addPath(path)
+        ctx.addPath(CGPath(roundedRect: badgeRect, cornerWidth: 4, cornerHeight: 4, transform: nil))
         ctx.fillPath()
 
         NSGraphicsContext.saveGraphicsState()
@@ -127,6 +172,8 @@ final class DetectionOverlayLayer: CALayer {
         attrStr.draw(at: CGPoint(x: badgeRect.minX + pad, y: badgeRect.minY + pad * 0.5))
         NSGraphicsContext.restoreGraphicsState()
     }
+
+    // MARK: - 유틸
 
     private func colorForLabel(_ label: String) -> NSColor {
         let hash = abs(label.hashValue)

@@ -88,27 +88,36 @@ macOS용 네이티브 비디오 플레이어. Swift + FFmpeg 8.1 기반.
 - 재생 완료 시 자동 정지
 - 트랙 선택 (다중 오디오/자막 트랙)
 
-### 10. 실시간 객체 탐지
-- 우클릭 메뉴에서 "객체 감지 켜기/끄기"로 활성화
-- CoreML + Vision 프레임워크 기반 (외부 CLI 의존성 없음)
-- YOLOv3Tiny 모델 내장 (COCO 80클래스: person, car, dog 등)
-- ANE/GPU 하드웨어 가속으로 실시간 추론
-- 비동기 추론 파이프라인: 비디오 재생을 차단하지 않음
-- 프레임 스킵으로 추론 부하 조절 (기본 3프레임마다 1회)
-- 바운딩 박스 + 클래스 레이블 + 신뢰도 오버레이
-- 비디오 회전에 자동 대응
+### 10. AI 분석 (실시간)
+- 우클릭 → "AI 분석" 서브메뉴에서 모드 선택
+- 3종 모델 내장:
+  - **객체 탐지 (YOLOv8n)**: COCO 80클래스, 바운딩 박스 + 레이블 오버레이
+  - **자세 추정 (Pose)**: Apple Vision 내장 (15관절 스켈레톤, 모델 파일 불필요)
+  - **깊이 추정 (MiDaS)**: 단안 깊이맵 히트맵 오버레이
+- CoreML + Vision 프레임워크 기반 (외부 의존성 없음)
+- ANE/GPU 하드웨어 가속, 비동기 파이프라인
+- 자원 경합 시 탐지 자동 보류 (비디오 우선)
+- seek 시 결과 즉시 클리어 + seekGeneration으로 stale 추론 폐기
 
-## 객체 탐지 모델 관리
-- 모델 파일은 `Sources/iPlayer/Resources/YOLOv3Tiny.mlmodelc`에 내장
-- ONNX 모델을 CoreML로 변환하여 사용:
+## AI 모델 관리
+- 내장 모델: `Sources/iPlayer/Resources/` 하위
+  - `YOLOv8n.mlmodelc` (6.2MB) — 객체 탐지
+  - `YOLOv3Tiny.mlmodelc` (34MB) — 객체 탐지 (폴백)
+  - `MiDaSSmall.mlmodelc` (32MB) — 깊이 추정
+- Pose 모드는 Apple Vision 내장 `VNDetectHumanBodyPoseRequest` 사용 (모델 파일 없음)
+- ONNX → CoreML 변환:
   ```bash
-  pip install coremltools
-  python -c "import coremltools as ct; model = ct.convert('model.onnx'); model.save('Model.mlmodel')"
-  xcrun coremlcompiler compile Model.mlmodel Sources/iPlayer/Resources/
+  pip install coremltools onnx2torch
+  python -c "
+  from onnx2torch import convert; import torch, coremltools as ct
+  m = convert('model.onnx'); m.eval()
+  t = torch.jit.trace(m, torch.randn(1,3,256,256))
+  ct.convert(t, minimum_deployment_target=ct.target.macOS14).save('Model.mlpackage')
+  "
+  xcrun coremlcompiler compile Model.mlpackage Sources/iPlayer/Resources/
   ```
-- 모델 교체 시 `ObjectDetector.swift`의 `findModelURL()` 파일명도 함께 수정
-- CoreML 객체 탐지 모델은 `VNRecognizedObjectObservation`을 출력해야 함
-- 새 모델 추가 시 반드시 `Package.swift`의 `resources`에 `.copy()` 항목 추가
+- 새 모델 추가 시 `Package.swift`의 `resources`에 `.copy()` 항목 추가
+- `ObjectDetector.swift`의 `DetectorMode` enum에 새 케이스 추가
 
 ## 빌드 방법
 ```bash

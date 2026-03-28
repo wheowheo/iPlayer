@@ -169,7 +169,7 @@ final class PlayerView: NSView {
             let target = fraction * self.controller.duration
             if self.objectDetectionEnabled {
                 self.objectDetector.reset()
-                self.detectionLayer.detections = []
+                self.detectionLayer.result = .empty
             }
             self.controller.seek(to: target)
         }
@@ -357,9 +357,10 @@ final class PlayerView: NSView {
             }
         }
         if objectDetectionEnabled {
-            detectionLayer.detections = objectDetector.latestResults
+            detectionLayer.result = objectDetector.latestResult
             detectionLayer.detectionState = objectDetector.state
             detectionLayer.detectionFPS = objectDetector.detectionFPS
+            detectionLayer.activeMode = objectDetector.mode
             detectionLayer.hideStatusBadge = showInfo
         }
         CATransaction.commit()
@@ -491,8 +492,9 @@ final class PlayerView: NSView {
             text += """
 
             ─────────────────
-            Detect: \(detState)
-            Detect FPS: \(String(format: "%.1f", detFPS))
+            AI: \(objectDetector.mode.rawValue)
+            State: \(detState)
+            AI FPS: \(String(format: "%.1f", detFPS))
             """
         }
 
@@ -898,11 +900,25 @@ final class PlayerView: NSView {
 
         menu.addItem(NSMenuItem.separator())
 
-        // 객체 감지
-        let detectTitle = objectDetectionEnabled ? "객체 감지 끄기" : "객체 감지 켜기"
-        let detectItem = NSMenuItem(title: detectTitle, action: #selector(contextToggleObjectDetection), keyEquivalent: "")
-        detectItem.target = self
-        menu.addItem(detectItem)
+        // AI 분석
+        let aiMenu = NSMenu()
+        // 끄기
+        let offItem = NSMenuItem(title: "끄기", action: #selector(contextDetectionOff), keyEquivalent: "")
+        offItem.target = self
+        if !objectDetectionEnabled { offItem.state = .on }
+        aiMenu.addItem(offItem)
+        aiMenu.addItem(NSMenuItem.separator())
+        // 모드 선택
+        for mode in DetectorMode.allCases {
+            let item = NSMenuItem(title: mode.rawValue, action: #selector(contextSelectDetectorMode(_:)), keyEquivalent: "")
+            item.representedObject = mode.rawValue
+            item.target = self
+            if objectDetectionEnabled && objectDetector.mode == mode { item.state = .on }
+            aiMenu.addItem(item)
+        }
+        let aiMenuItem = NSMenuItem(title: "AI 분석", action: nil, keyEquivalent: "")
+        aiMenuItem.submenu = aiMenu
+        menu.addItem(aiMenuItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -971,16 +987,23 @@ final class PlayerView: NSView {
         controller.selectAudioTrack(index: Int32(sender.tag))
     }
 
-    @objc private func contextToggleObjectDetection() {
-        objectDetectionEnabled.toggle()
-        objectDetector.isEnabled = objectDetectionEnabled
-        if objectDetectionEnabled {
-            objectDetector.loadModel()
-            detectionLayer.isHidden = false
-        } else {
-            detectionLayer.isHidden = true
-            detectionLayer.detections = []
-        }
+    @objc private func contextDetectionOff() {
+        objectDetectionEnabled = false
+        objectDetector.isEnabled = false
+        objectDetector.reset()
+        detectionLayer.isHidden = true
+        detectionLayer.result = .empty
+    }
+
+    @objc private func contextSelectDetectorMode(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String,
+              let mode = DetectorMode.allCases.first(where: { $0.rawValue == rawValue }) else { return }
+        objectDetectionEnabled = true
+        objectDetector.isEnabled = true
+        objectDetector.reset()
+        objectDetector.loadModel(for: mode)
+        detectionLayer.isHidden = false
+        detectionLayer.result = .empty
     }
 
     @objc private func contextToggleFullscreen() {

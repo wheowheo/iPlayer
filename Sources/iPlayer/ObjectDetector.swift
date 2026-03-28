@@ -3,33 +3,67 @@ import Vision
 import CoreML
 import CoreVideo
 import AppKit
+import QuartzCore
+
+// MARK: - 모델 타입
+
+enum DetectorMode: String, CaseIterable {
+    case objectDetection = "객체 탐지 (YOLOv8n)"
+    case pose = "자세 추정 (Pose)"
+    case depth = "깊이 추정 (MiDaS)"
+}
+
+// MARK: - 결과 타입
 
 struct DetectedObject {
     let label: String
     let confidence: Float
-    let boundingBox: CGRect  // Vision 정규화 좌표 (origin=bottom-left, 0..1)
+    let boundingBox: CGRect
+}
+
+struct PoseJoint {
+    let name: String
+    let location: CGPoint   // Vision 정규화 좌표 (origin=bottom-left)
+    let confidence: Float
+}
+
+struct PoseResult {
+    let joints: [PoseJoint]
+    let connections: [(Int, Int)]  // 관절 연결 인덱스 쌍
 }
 
 enum DetectionState {
-    case idle       // 비활성
-    case detecting  // 추론 진행 중
-    case deferred   // 자원 부족으로 보류
+    case idle
+    case detecting
+    case deferred
 }
+
+// MARK: - 통합 결과
+
+enum DetectionResult {
+    case objects([DetectedObject])
+    case poses([PoseResult])
+    case depthMap(CGImage)
+    case empty
+}
+
+// MARK: - ObjectDetector
 
 final class ObjectDetector: @unchecked Sendable {
     private var vnModel: VNCoreMLModel?
-    // 비디오보다 낮은 우선순위 — 자원 경합 시 비디오가 우선
+    private var depthModel: VNCoreMLModel?
     private let detectionQueue = DispatchQueue(label: "iPlayer.ObjectDetection", qos: .utility)
 
     private let resultsLock = NSLock()
-    private var _latestResults: [DetectedObject] = []
-    var latestResults: [DetectedObject] {
+    private var _latestResult: DetectionResult = .empty
+    var latestResult: DetectionResult {
         resultsLock.lock()
-        let r = _latestResults
+        let r = _latestResult
         resultsLock.unlock()
         return r
     }
 
+    var mode: DetectorMode = .objectDetection
     private(set) var isLoaded = false
     private var isBusy = false
     private var seekGeneration: Int = 0
@@ -37,12 +71,9 @@ final class ObjectDetector: @unchecked Sendable {
     var confidenceThreshold: Float = 0.5
     var isEnabled = false
 
-    // 적응적 프레임 스킵 임계값
-    private let queueDepthHealthy = 30    // 이 이상이면 정상 탐지
-    private let queueDepthReduced = 15    // 이 이상이면 감소 모드
-    // 이하이면 탐지 보류
+    private let queueDepthHealthy = 30
+    private let queueDepthReduced = 15
 
-    // 탐지 상태
     private(set) var state: DetectionState = .idle
     private(set) var detectionFPS: Double = 0
     private var fpsCounter = 0
@@ -50,63 +81,83 @@ final class ObjectDetector: @unchecked Sendable {
 
     var onDetectionUpdate: (() -> Void)?
 
-    func loadModel() {
-        guard !isLoaded else { return }
+    // 관절 연결 정의 (스켈레톤 라인)
+    private static let poseConnections: [(VNHumanBodyPoseObservation.JointName, VNHumanBodyPoseObservation.JointName)] = [
+        (.nose, .neck),
+        (.neck, .leftShoulder), (.neck, .rightShoulder),
+        (.leftShoulder, .leftElbow), (.leftElbow, .leftWrist),
+        (.rightShoulder, .rightElbow), (.rightElbow, .rightWrist),
+        (.neck, .root),
+        (.root, .leftHip), (.root, .rightHip),
+        (.leftHip, .leftKnee), (.leftKnee, .leftAnkle),
+        (.rightHip, .rightKnee), (.rightKnee, .rightAnkle),
+    ]
+
+    // MARK: - 모델 로드
+
+    func loadModel(for newMode: DetectorMode) {
+        mode = newMode
+
+        // Pose는 모델 파일 불필요 (Apple Vision 내장)
+        if newMode == .pose {
+            isLoaded = true
+            log("[ObjectDetector] Pose 모드 (Apple Vision 내장)")
+            return
+        }
+
+        let modelName: String
+        switch newMode {
+        case .objectDetection: modelName = "YOLOv8n"
+        case .depth: modelName = "MiDaSSmall"
+        case .pose: return
+        }
+
         detectionQueue.async { [weak self] in
             guard let self = self else { return }
-            guard let modelURL = self.findModelURL() else {
-                log("[ObjectDetector] 모델 파일 없음")
+            guard let modelURL = self.findModelURL(name: modelName) else {
+                // 폴백: YOLOv3Tiny
+                if newMode == .objectDetection, let fallback = self.findModelURL(name: "YOLOv3Tiny") {
+                    self.loadCoreML(from: fallback, forDepth: false)
+                    return
+                }
+                log("[ObjectDetector] \(modelName) 모델 파일 없음")
                 return
             }
-            do {
-                let compiled: URL
-                if modelURL.pathExtension == "mlmodelc" {
-                    compiled = modelURL
-                } else {
-                    compiled = try MLModel.compileModel(at: modelURL)
-                }
-                let config = MLModelConfiguration()
-                config.computeUnits = .all
-                let mlModel = try MLModel(contentsOf: compiled, configuration: config)
-                self.vnModel = try VNCoreMLModel(for: mlModel)
-                self.isLoaded = true
-                log("[ObjectDetector] 모델 로드 완료")
-            } catch {
-                log("[ObjectDetector] 모델 로드 실패: \(error)")
-            }
+            self.loadCoreML(from: modelURL, forDepth: newMode == .depth)
         }
     }
 
-    func loadModel(at url: URL) {
-        detectionQueue.async { [weak self] in
-            guard let self = self else { return }
-            do {
-                let compiled: URL
-                if url.pathExtension == "mlmodelc" {
-                    compiled = url
-                } else {
-                    compiled = try MLModel.compileModel(at: url)
-                }
-                let config = MLModelConfiguration()
-                config.computeUnits = .all
-                let mlModel = try MLModel(contentsOf: compiled, configuration: config)
-                self.vnModel = try VNCoreMLModel(for: mlModel)
-                self.isLoaded = true
-                log("[ObjectDetector] 외부 모델 로드 완료: \(url.lastPathComponent)")
-            } catch {
-                log("[ObjectDetector] 외부 모델 로드 실패: \(error)")
+    private func loadCoreML(from url: URL, forDepth: Bool) {
+        do {
+            let compiled: URL
+            if url.pathExtension == "mlmodelc" {
+                compiled = url
+            } else {
+                compiled = try MLModel.compileModel(at: url)
             }
+            let config = MLModelConfiguration()
+            config.computeUnits = .all
+            let mlModel = try MLModel(contentsOf: compiled, configuration: config)
+            let vn = try VNCoreMLModel(for: mlModel)
+            if forDepth {
+                depthModel = vn
+            } else {
+                vnModel = vn
+            }
+            isLoaded = true
+            log("[ObjectDetector] \(url.lastPathComponent) 로드 완료")
+        } catch {
+            log("[ObjectDetector] 모델 로드 실패: \(error)")
         }
     }
 
-    /// 프레임 큐 깊이를 받아 자원 경합 시 탐지를 보류
+    // MARK: - 프레임 처리
+
     func processFrame(_ pixelBuffer: CVPixelBuffer, queueDepth: Int) {
         guard isEnabled, isLoaded, !isBusy else { return }
 
-        // 프레임 큐 깊이에 따른 적응적 스케줄링
-        // isBusy 가드가 자연스러운 속도 제한 — 추론 완료 즉시 다음 프레임 처리
         if queueDepth >= queueDepthHealthy {
-            // 정상: 매 프레임 시도 (isBusy가 실제 속도 제한)
+            // 매 프레임 시도
         } else if queueDepth >= queueDepthReduced {
             frameSkipCounter += 1
             guard frameSkipCounter >= 3 else { return }
@@ -119,11 +170,20 @@ final class ObjectDetector: @unchecked Sendable {
         isBusy = true
         state = .detecting
         let gen = seekGeneration
+        let currentMode = mode
         detectionQueue.async { [weak self] in
             guard let self = self else { return }
             defer { self.isBusy = false }
             guard gen == self.seekGeneration else { return }
-            self.runInference(on: pixelBuffer)
+
+            switch currentMode {
+            case .objectDetection:
+                self.runObjectDetection(pixelBuffer: pixelBuffer, gen: gen)
+            case .pose:
+                self.runPoseEstimation(pixelBuffer: pixelBuffer, gen: gen)
+            case .depth:
+                self.runDepthEstimation(pixelBuffer: pixelBuffer, gen: gen)
+            }
             self.measureFPS()
         }
     }
@@ -145,16 +205,25 @@ final class ObjectDetector: @unchecked Sendable {
         isBusy = true
         state = .detecting
         let gen = seekGeneration
+        let currentMode = mode
         detectionQueue.async { [weak self] in
             guard let self = self else { return }
             defer { self.isBusy = false }
             guard gen == self.seekGeneration else { return }
-            self.runInferenceCG(on: cgImage)
+
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            switch currentMode {
+            case .objectDetection:
+                self.runObjectDetectionCG(handler: handler, gen: gen)
+            case .pose:
+                self.runPoseEstimationCG(handler: handler, gen: gen)
+            case .depth:
+                self.runDepthEstimationCG(handler: handler, gen: gen)
+            }
             self.measureFPS()
         }
     }
 
-    /// Seek 발생 시 호출 — 결과 클리어 + 진행 중 추론 무효화
     func reset() {
         seekGeneration += 1
         isBusy = false
@@ -163,56 +232,210 @@ final class ObjectDetector: @unchecked Sendable {
         detectionFPS = 0
         fpsCounter = 0
         resultsLock.lock()
-        _latestResults = []
+        _latestResult = .empty
         resultsLock.unlock()
     }
 
-    // MARK: - Private
+    // MARK: - 객체 탐지 (YOLO)
 
-    private func runInference(on pixelBuffer: CVPixelBuffer) {
-        guard let vnModel = vnModel else { return }
-        let gen = seekGeneration
-        let request = VNCoreMLRequest(model: vnModel) { [weak self] request, _ in
+    private func runObjectDetection(pixelBuffer: CVPixelBuffer, gen: Int) {
+        guard let model = vnModel else { return }
+        let request = VNCoreMLRequest(model: model) { [weak self] req, _ in
             guard let self = self, gen == self.seekGeneration else { return }
-            self.handleResults(request.results)
+            self.handleObjectResults(req.results)
         }
         request.imageCropAndScaleOption = .scaleFill
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
         try? handler.perform([request])
     }
 
-    private func runInferenceCG(on cgImage: CGImage) {
-        guard let vnModel = vnModel else { return }
-        let gen = seekGeneration
-        let request = VNCoreMLRequest(model: vnModel) { [weak self] request, _ in
+    private func runObjectDetectionCG(handler: VNImageRequestHandler, gen: Int) {
+        guard let model = vnModel else { return }
+        let request = VNCoreMLRequest(model: model) { [weak self] req, _ in
             guard let self = self, gen == self.seekGeneration else { return }
-            self.handleResults(request.results)
+            self.handleObjectResults(req.results)
         }
         request.imageCropAndScaleOption = .scaleFill
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         try? handler.perform([request])
     }
 
-    private func handleResults(_ results: [Any]?) {
+    private func handleObjectResults(_ results: [Any]?) {
         guard let observations = results as? [VNRecognizedObjectObservation] else {
-            resultsLock.lock()
-            _latestResults = []
-            resultsLock.unlock()
+            setResult(.objects([]))
             return
         }
         let filtered = observations
             .filter { $0.confidence >= confidenceThreshold }
-            .map { obs in
-                DetectedObject(
-                    label: obs.labels.first?.identifier ?? "unknown",
-                    confidence: obs.confidence,
-                    boundingBox: obs.boundingBox
-                )
-            }
-        resultsLock.lock()
-        _latestResults = filtered
-        resultsLock.unlock()
+            .map { DetectedObject(label: $0.labels.first?.identifier ?? "?", confidence: $0.confidence, boundingBox: $0.boundingBox) }
+        setResult(.objects(filtered))
+    }
 
+    // MARK: - 자세 추정 (Apple Vision 내장)
+
+    private func runPoseEstimation(pixelBuffer: CVPixelBuffer, gen: Int) {
+        let request = VNDetectHumanBodyPoseRequest { [weak self] req, _ in
+            guard let self = self, gen == self.seekGeneration else { return }
+            self.handlePoseResults(req.results)
+        }
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+        try? handler.perform([request])
+    }
+
+    private func runPoseEstimationCG(handler: VNImageRequestHandler, gen: Int) {
+        let request = VNDetectHumanBodyPoseRequest { [weak self] req, _ in
+            guard let self = self, gen == self.seekGeneration else { return }
+            self.handlePoseResults(req.results)
+        }
+        try? handler.perform([request])
+    }
+
+    private func handlePoseResults(_ results: [Any]?) {
+        guard let observations = results as? [VNHumanBodyPoseObservation] else {
+            setResult(.poses([]))
+            return
+        }
+
+        let jointNames: [VNHumanBodyPoseObservation.JointName] = [
+            .nose, .neck,
+            .leftShoulder, .rightShoulder,
+            .leftElbow, .rightElbow,
+            .leftWrist, .rightWrist,
+            .root,
+            .leftHip, .rightHip,
+            .leftKnee, .rightKnee,
+            .leftAnkle, .rightAnkle,
+        ]
+
+        var poses: [PoseResult] = []
+        for obs in observations {
+            var joints: [PoseJoint] = []
+            for name in jointNames {
+                if let pt = try? obs.recognizedPoint(name), pt.confidence > 0.1 {
+                    joints.append(PoseJoint(name: name.rawValue.rawValue, location: pt.location, confidence: Float(pt.confidence)))
+                } else {
+                    joints.append(PoseJoint(name: name.rawValue.rawValue, location: .zero, confidence: 0))
+                }
+            }
+
+            // 관절 인덱스 매핑으로 연결선 생성
+            var connections: [(Int, Int)] = []
+            for (from, to) in Self.poseConnections {
+                if let fi = jointNames.firstIndex(of: from), let ti = jointNames.firstIndex(of: to) {
+                    if joints[fi].confidence > 0.1 && joints[ti].confidence > 0.1 {
+                        connections.append((fi, ti))
+                    }
+                }
+            }
+            poses.append(PoseResult(joints: joints, connections: connections))
+        }
+        setResult(.poses(poses))
+    }
+
+    // MARK: - 깊이 추정 (MiDaS)
+
+    private func runDepthEstimation(pixelBuffer: CVPixelBuffer, gen: Int) {
+        guard let model = depthModel else { return }
+        let request = VNCoreMLRequest(model: model) { [weak self] req, _ in
+            guard let self = self, gen == self.seekGeneration else { return }
+            self.handleDepthResults(req.results)
+        }
+        request.imageCropAndScaleOption = .scaleFill
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+        try? handler.perform([request])
+    }
+
+    private func runDepthEstimationCG(handler: VNImageRequestHandler, gen: Int) {
+        guard let model = depthModel else { return }
+        let request = VNCoreMLRequest(model: model) { [weak self] req, _ in
+            guard let self = self, gen == self.seekGeneration else { return }
+            self.handleDepthResults(req.results)
+        }
+        request.imageCropAndScaleOption = .scaleFill
+        try? handler.perform([request])
+    }
+
+    private func handleDepthResults(_ results: [Any]?) {
+        guard let obs = results as? [VNCoreMLFeatureValueObservation],
+              let first = obs.first,
+              let multiArray = first.featureValue.multiArrayValue else {
+            setResult(.empty)
+            return
+        }
+
+        // MLMultiArray → 깊이 히트맵 CGImage 변환
+        if let image = depthArrayToImage(multiArray) {
+            setResult(.depthMap(image))
+        } else {
+            setResult(.empty)
+        }
+    }
+
+    private func depthArrayToImage(_ array: MLMultiArray) -> CGImage? {
+        let shape = array.shape.map { $0.intValue }
+        guard shape.count >= 2 else { return nil }
+        let h = shape[shape.count - 2]
+        let w = shape[shape.count - 1]
+        let count = w * h
+
+        // 정규화: min-max → 0~255
+        let ptr = array.dataPointer.bindMemory(to: Float32.self, capacity: count)
+        var minVal: Float = .greatestFiniteMagnitude
+        var maxVal: Float = -.greatestFiniteMagnitude
+        for i in 0..<count {
+            let v = ptr[i]
+            if v < minVal { minVal = v }
+            if v > maxVal { maxVal = v }
+        }
+        let range = maxVal - minVal
+        guard range > 0 else { return nil }
+
+        // RGBA 히트맵 생성 (가까운=빨강, 먼=파랑)
+        var pixels = [UInt8](repeating: 0, count: count * 4)
+        for i in 0..<count {
+            let norm = (ptr[i] - minVal) / range  // 0=먼, 1=가까운
+            let (r, g, b) = depthToColor(norm)
+            pixels[i * 4] = r
+            pixels[i * 4 + 1] = g
+            pixels[i * 4 + 2] = b
+            pixels[i * 4 + 3] = 160  // 반투명
+        }
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(data: &pixels, width: w, height: h,
+                                  bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: colorSpace,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        return ctx.makeImage()
+    }
+
+    private func depthToColor(_ value: Float) -> (UInt8, UInt8, UInt8) {
+        // Turbo colormap (근사)
+        let t = max(0, min(1, value))
+        let r: Float
+        let g: Float
+        let b: Float
+        if t < 0.25 {
+            let s = t / 0.25
+            r = 0; g = s; b = 1
+        } else if t < 0.5 {
+            let s = (t - 0.25) / 0.25
+            r = 0; g = 1; b = 1 - s
+        } else if t < 0.75 {
+            let s = (t - 0.5) / 0.25
+            r = s; g = 1; b = 0
+        } else {
+            let s = (t - 0.75) / 0.25
+            r = 1; g = 1 - s; b = 0
+        }
+        return (UInt8(r * 255), UInt8(g * 255), UInt8(b * 255))
+    }
+
+    // MARK: - 공통
+
+    private func setResult(_ result: DetectionResult) {
+        resultsLock.lock()
+        _latestResult = result
+        resultsLock.unlock()
         DispatchQueue.main.async { [weak self] in
             self?.onDetectionUpdate?()
         }
@@ -230,33 +453,22 @@ final class ObjectDetector: @unchecked Sendable {
         }
     }
 
-    private func findModelURL() -> URL? {
+    private func findModelURL(name: String) -> URL? {
         let execURL = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
-        let bundleName = "iPlayer_iPlayer.bundle"
-        let bundlePath = execURL.appendingPathComponent(bundleName)
+        let bundlePath = execURL.appendingPathComponent("iPlayer_iPlayer.bundle")
         if let bundle = Bundle(url: bundlePath) {
-            if let url = bundle.url(forResource: "YOLOv3Tiny", withExtension: "mlmodelc") {
-                return url
-            }
-            if let url = bundle.url(forResource: "YOLOv3Tiny", withExtension: "mlmodel") {
-                return url
+            for ext in ["mlmodelc", "mlmodel"] {
+                if let url = bundle.url(forResource: name, withExtension: ext) { return url }
             }
         }
 
-        let resourceDir = execURL.appendingPathComponent("Resources")
-        for ext in ["mlmodelc", "mlmodel"] {
-            let url = resourceDir.appendingPathComponent("YOLOv3Tiny.\(ext)")
-            if FileManager.default.fileExists(atPath: url.path) { return url }
+        for dir in [execURL.appendingPathComponent("Resources"),
+                    URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Resources")] {
+            for ext in ["mlmodelc", "mlmodel"] {
+                let url = dir.appendingPathComponent("\(name).\(ext)")
+                if FileManager.default.fileExists(atPath: url.path) { return url }
+            }
         }
-
-        let srcResource = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("Resources")
-        for ext in ["mlmodelc", "mlmodel"] {
-            let url = srcResource.appendingPathComponent("YOLOv3Tiny.\(ext)")
-            if FileManager.default.fileExists(atPath: url.path) { return url }
-        }
-
         return nil
     }
 }
