@@ -1080,13 +1080,21 @@ final class PlayerView: NSView {
         // 얼굴 합성: 참조 이미지 선택 필요
         if mode == .faceSwap {
             let panel = NSOpenPanel()
-            panel.title = "합성할 얼굴 이미지 선택"
-            panel.allowedContentTypes = [.image]
+            panel.title = "얼굴 소스 선택 (이미지 또는 3D 모델)"
             panel.canChooseFiles = true
             panel.canChooseDirectories = false
-            guard panel.runModal() == .OK, let url = panel.url,
-                  let image = NSImage(contentsOf: url) else { return }
-            objectDetector.setReferenceFace(image: image)
+            panel.allowsOtherFileTypes = true
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+
+            let ext = url.pathExtension.lowercased()
+            if ["obj", "usdz", "usda", "dae", "scn"].contains(ext) {
+                // 3D 모델 로드
+                objectDetector.setReference3DModel(url: url)
+            } else {
+                // 2D 이미지 → 3D 원통형 메시 매핑
+                guard let image = NSImage(contentsOf: url) else { return }
+                objectDetector.setReferenceFace(image: image)
+            }
         }
 
         objectDetectionEnabled = true

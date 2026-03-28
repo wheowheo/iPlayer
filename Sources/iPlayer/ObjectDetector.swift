@@ -106,10 +106,12 @@ final class ObjectDetector: @unchecked Sendable {
     private var depthModel: VNCoreMLModel?
     private let detectionQueue = DispatchQueue(label: "iPlayer.ObjectDetection", qos: .utility)
 
-    // 얼굴 합성용 참조 이미지
+    // 얼굴 합성
     private var referenceFace: CGImage?
-    private var referenceLandmarks: (leftEye: CGPoint, rightEye: CGPoint)?  // 정규화 좌표
+    private var referenceLandmarks: (leftEye: CGPoint, rightEye: CGPoint)?
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    private let faceRenderer3D = FaceRenderer3D()
+    private(set) var is3DSource = false  // 3D 모델 로드 여부
 
     private let resultsLock = NSLock()
     private var _latestResult: DetectionResult = .empty
@@ -179,10 +181,23 @@ final class ObjectDetector: @unchecked Sendable {
             referenceFace = cropped
         }
 
-        log("[FaceSwap] 참조 얼굴 설정 완료 (\(cgImage.width)x\(cgImage.height))")
+        // 3D 렌더러에도 로드 (2D 이미지 → 원통형 메시 매핑)
+        faceRenderer3D.loadFromImage(image)
+        is3DSource = true
+
+        log("[FaceSwap] 3D 얼굴 설정 완료 (\(cgImage.width)x\(cgImage.height))")
     }
 
-    var hasReferenceFace: Bool { referenceFace != nil }
+    var hasReferenceFace: Bool { referenceFace != nil || is3DSource }
+
+    /// .obj/.usdz 3D 모델 로드
+    func setReference3DModel(url: URL) {
+        if faceRenderer3D.loadFromFile(url) {
+            is3DSource = true
+            referenceFace = nil  // 2D 참조 클리어
+            log("[FaceSwap] 3D 모델 로드: \(url.lastPathComponent)")
+        }
+    }
 
     // MARK: - 모델 로드
 
@@ -687,7 +702,7 @@ final class ObjectDetector: @unchecked Sendable {
     // MARK: - 얼굴 합성 (Face Swap)
 
     private func runFaceSwap(handler: VNImageRequestHandler, gen: Int) {
-        guard let refFace = referenceFace else {
+        guard is3DSource || referenceFace != nil else {
             setResult(.empty); return
         }
 
@@ -706,8 +721,6 @@ final class ObjectDetector: @unchecked Sendable {
 
             let bbox = obs.boundingBox
             let leC = eyeCenter(le), reC = eyeCenter(re)
-
-            // 얼굴 bbox 내 정규화 좌표
             let noseC: CGPoint
             if let nose = lm.nose, nose.pointCount > 0 {
                 noseC = landmarkCenter(nose)
@@ -715,18 +728,17 @@ final class ObjectDetector: @unchecked Sendable {
                 noseC = CGPoint(x: 0.5, y: 0.4)
             }
 
-            // 3D 머리 포즈 추정
             let pose = estimateHeadPose(leftEye: leC, rightEye: reC, nose: noseC)
 
-            // 3D 원근 워핑
-            if let warped = warp3D(refFace, pose: pose) {
-                let inset: CGFloat = 0.1
-                let maskRect = CGRect(x: bbox.origin.x + bbox.width * inset,
-                                       y: bbox.origin.y + bbox.height * inset,
-                                       width: bbox.width * (1 - inset * 2),
-                                       height: bbox.height * (1 - inset * 2))
-                entries.append(FaceSwapEntry(warpedFace: warped, targetRect: bbox, maskRect: maskRect))
-            }
+            // SceneKit 3D 렌더링
+            guard let rendered = faceRenderer3D.render(roll: pose.roll, yaw: pose.yaw, pitch: pose.pitch) else { continue }
+
+            let inset: CGFloat = 0.1
+            let maskRect = CGRect(x: bbox.origin.x + bbox.width * inset,
+                                   y: bbox.origin.y + bbox.height * inset,
+                                   width: bbox.width * (1 - inset * 2),
+                                   height: bbox.height * (1 - inset * 2))
+            entries.append(FaceSwapEntry(warpedFace: rendered, targetRect: bbox, maskRect: maskRect))
         }
         setResult(.faceSwap(entries))
     }

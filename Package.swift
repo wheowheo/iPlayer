@@ -53,6 +53,8 @@ let package = Package(
                 .linkedFramework("CoreML"),
                 .linkedFramework("Vision"),
                 .linkedFramework("AVFoundation"),
+                .linkedFramework("SceneKit"),
+                .linkedFramework("ModelIO"),
             ]
         ),
     ]
