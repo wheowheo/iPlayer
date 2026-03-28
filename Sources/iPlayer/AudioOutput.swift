@@ -96,9 +96,21 @@ final class AudioOutput {
             return false
         }
 
+        // TimePitch 활성화 + 알고리즘 명시 설정
         var enableTimePitch: UInt32 = 1
-        AudioQueueSetProperty(queue, kAudioQueueProperty_EnableTimePitch,
+        var tpStatus = AudioQueueSetProperty(queue, kAudioQueueProperty_EnableTimePitch,
                               &enableTimePitch, UInt32(MemoryLayout<UInt32>.size))
+        if tpStatus != noErr {
+            log("[AudioOutput] TimePitch 활성화 실패: \(tpStatus)")
+        }
+
+        var algorithm: UInt32 = kAudioQueueTimePitchAlgorithm_Spectral
+        tpStatus = AudioQueueSetProperty(queue, kAudioQueueProperty_TimePitchAlgorithm,
+                              &algorithm, UInt32(MemoryLayout<UInt32>.size))
+        if tpStatus != noErr {
+            log("[AudioOutput] TimePitch 알고리즘 설정 실패: \(tpStatus)")
+        }
+
         AudioQueueSetParameter(queue, kAudioQueueParam_PlayRate, Float32(playbackRate))
         AudioQueueSetParameter(queue, kAudioQueueParam_Volume, Float32(volume))
 
