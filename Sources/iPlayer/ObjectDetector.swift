@@ -376,36 +376,46 @@ final class ObjectDetector: @unchecked Sendable {
         let h = shape[shape.count - 2]
         let w = shape[shape.count - 1]
         let count = w * h
+        guard count > 0 else { return nil }
 
-        // 정규화: min-max → 0~255
-        let ptr = array.dataPointer.bindMemory(to: Float32.self, capacity: count)
+        // dataType에 무관하게 안전하게 Float 값 추출
+        var values = [Float](repeating: 0, count: count)
+        for i in 0..<count {
+            values[i] = array[i].floatValue
+        }
+
+        // min-max 정규화
         var minVal: Float = .greatestFiniteMagnitude
         var maxVal: Float = -.greatestFiniteMagnitude
-        for i in 0..<count {
-            let v = ptr[i]
+        for v in values {
             if v < minVal { minVal = v }
             if v > maxVal { maxVal = v }
         }
         let range = maxVal - minVal
         guard range > 0 else { return nil }
 
-        // RGBA 히트맵 생성 (가까운=빨강, 먼=파랑)
-        var pixels = [UInt8](repeating: 0, count: count * 4)
-        for i in 0..<count {
-            let norm = (ptr[i] - minVal) / range  // 0=먼, 1=가까운
-            let (r, g, b) = depthToColor(norm)
-            pixels[i * 4] = r
-            pixels[i * 4 + 1] = g
-            pixels[i * 4 + 2] = b
-            pixels[i * 4 + 3] = 160  // 반투명
+        // RGBA 히트맵 생성
+        var pixelData = Data(count: count * 4)
+        pixelData.withUnsafeMutableBytes { rawBuf in
+            let ptr = rawBuf.baseAddress!.assumingMemoryBound(to: UInt8.self)
+            for i in 0..<count {
+                let norm = (values[i] - minVal) / range
+                let (r, g, b) = depthToColor(norm)
+                ptr[i * 4] = r
+                ptr[i * 4 + 1] = g
+                ptr[i * 4 + 2] = b
+                ptr[i * 4 + 3] = 160
+            }
         }
 
         let colorSpace = CGColorSpaceCreateDeviceRGB()
-        guard let ctx = CGContext(data: &pixels, width: w, height: h,
-                                  bitsPerComponent: 8, bytesPerRow: w * 4,
-                                  space: colorSpace,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        return ctx.makeImage()
+        guard let provider = CGDataProvider(data: pixelData as CFData) else { return nil }
+        return CGImage(width: w, height: h,
+                       bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                       space: colorSpace,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: true,
+                       intent: .defaultIntent)
     }
 
     private func depthToColor(_ value: Float) -> (UInt8, UInt8, UInt8) {
