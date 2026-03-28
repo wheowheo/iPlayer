@@ -102,7 +102,8 @@ final class PlayerController: @unchecked Sendable {
     // seek 제어
     private var seekRequest: Double? = nil
     private let seekLock = NSLock()
-    private var seekTargetPTS: Double = -1  // seek 후 오디오 필터링용
+    private var seekTargetPTS: Double = -1
+    private var frameSkipForSpeed: Int = 0  // 고속 패킷 스킵 카운터
 
     // 통계
     private(set) var droppedFrames: Int = 0
@@ -626,21 +627,20 @@ final class PlayerController: @unchecked Sendable {
         dropDebugger.recordQueueDepth(depth, playbackTime: masterClock, masterClock: masterClock)
 
         if speed > 2.0 {
-            // 고속 모드: 큐에서 가장 가까운 프레임을 찾아 표시
-            // 클럭보다 앞선 프레임이 나올 때까지 드롭하되, 마지막 프레임은 표시
-            var lastCandidate: VideoFrame? = nil
+            // 고속 모드: 클럭 이전 프레임은 스킵, 클럭에 가장 가까운 프레임 표시
             while let first = frameRing.first {
                 let diff = first.pts - masterClock
-                if diff <= effectiveShow {
-                    lastCandidate = first
-                    frameRing.removeFirst()
-                    if diff >= -frameDuration { break }
-                } else {
+                if diff > effectiveShow {
+                    // 아직 미래의 프레임 → 대기
                     break
                 }
-            }
-            if let candidate = lastCandidate {
-                frameToShow = candidate
+                // 클럭 이전 또는 근접 프레임
+                frameRing.removeFirst()
+                frameToShow = first  // 항상 최신 후보로 갱신
+                if diff >= -frameDuration * speedFactor {
+                    // 충분히 가까움 → 이 프레임 표시
+                    break
+                }
             }
         } else {
             // 일반 모드: 정밀 동기화
@@ -774,22 +774,32 @@ final class PlayerController: @unchecked Sendable {
                 let speed = playbackSpeed
                 let isKeyframe = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
 
-                // 고속 재생(>2x): 키프레임만 디코딩하여 부하 대폭 감소
-                if speed > 2.0 && !isKeyframe {
+                // 3배속 초과: 키프레임만 디코딩
+                if speed > 3.0 && !isKeyframe {
                     var pkt: UnsafeMutablePointer<AVPacket>? = packet
                     av_packet_free(&pkt)
                     continue
                 }
 
-                // 배압: 큐 만차 시
-                if videoPacketQueueSize > maxPacketQueueSize {
-                    if speed > 1.5 {
-                        // 고속: 대기 대신 드롭 → 오디오 스타베이션 방지
+                // 2~3배속: 2프레임 중 1프레임만 디코딩 (키프레임은 항상 유지)
+                if speed > 2.0 && speed <= 3.0 && !isKeyframe {
+                    frameSkipForSpeed += 1
+                    if frameSkipForSpeed % 2 != 0 {
                         var pkt: UnsafeMutablePointer<AVPacket>? = packet
                         av_packet_free(&pkt)
                         continue
                     }
-                    // 일반 속도: 대기 (seek 요청 시 즉시 탈출)
+                }
+
+                // 배압: 큐 만차 시
+                if videoPacketQueueSize > maxPacketQueueSize {
+                    if speed > 2.5 {
+                        // 초고속: 드롭하여 오디오 스타베이션 방지
+                        var pkt: UnsafeMutablePointer<AVPacket>? = packet
+                        av_packet_free(&pkt)
+                        continue
+                    }
+                    // 대기 (seek 요청 시 즉시 탈출)
                     while isDemuxing && videoPacketQueueSize > maxPacketQueueSize {
                         seekLock.lock()
                         let hasPendingSeek = seekRequest != nil
