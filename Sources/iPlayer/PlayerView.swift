@@ -11,9 +11,12 @@ final class PlayerView: NSView {
 
     // 컨트롤 바
     private let controlBar = NSView()
+    private let rewindButton = NSButton()
     private let playButton = NSButton()
+    private let forwardButton = NSButton()
     private let timeLabel = NSTextField(labelWithString: "00:00 / 00:00")
     private let seekBar = SeekBar()
+    private let speedPopup = NSPopUpButton()
     private let volumeSlider = NSSlider()
     private let speedLabel = NSTextField(labelWithString: "1.0x")
 
@@ -111,6 +114,14 @@ final class PlayerView: NSView {
         controlBar.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.7).cgColor
         addSubview(controlBar)
 
+        rewindButton.bezelStyle = .inline
+        rewindButton.title = "⏪"
+        rewindButton.font = .systemFont(ofSize: 14)
+        rewindButton.isBordered = false
+        rewindButton.target = self
+        rewindButton.action = #selector(rewindClicked)
+        controlBar.addSubview(rewindButton)
+
         playButton.bezelStyle = .inline
         playButton.title = "▶"
         playButton.font = .systemFont(ofSize: 16)
@@ -118,6 +129,14 @@ final class PlayerView: NSView {
         playButton.target = self
         playButton.action = #selector(playButtonClicked)
         controlBar.addSubview(playButton)
+
+        forwardButton.bezelStyle = .inline
+        forwardButton.title = "⏩"
+        forwardButton.font = .systemFont(ofSize: 14)
+        forwardButton.isBordered = false
+        forwardButton.target = self
+        forwardButton.action = #selector(forwardClicked)
+        controlBar.addSubview(forwardButton)
 
         seekBar.onSeek = { [weak self] fraction in
             guard let self = self else { return }
@@ -133,6 +152,19 @@ final class PlayerView: NSView {
         timeLabel.isEditable = false
         controlBar.addSubview(timeLabel)
 
+        // 속도 선택 팝업
+        speedPopup.pullsDown = false
+        speedPopup.isBordered = false
+        speedPopup.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        (speedPopup.cell as? NSPopUpButtonCell)?.arrowPosition = .arrowAtBottom
+        for speed in ["0.25x", "0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x", "3.0x", "4.0x"] {
+            speedPopup.addItem(withTitle: speed)
+        }
+        speedPopup.selectItem(withTitle: "1.0x")
+        speedPopup.target = self
+        speedPopup.action = #selector(speedPopupChanged)
+        controlBar.addSubview(speedPopup)
+
         volumeSlider.minValue = 0
         volumeSlider.maxValue = 2.0
         volumeSlider.doubleValue = 1.0
@@ -145,6 +177,7 @@ final class PlayerView: NSView {
         speedLabel.backgroundColor = .clear
         speedLabel.isBordered = false
         speedLabel.isEditable = false
+        speedLabel.isHidden = true  // speedPopup으로 대체
         controlBar.addSubview(speedLabel)
 
         registerForDraggedTypes(supportedTypes)
@@ -234,15 +267,27 @@ final class PlayerView: NSView {
         let seekY: CGFloat = 30
         seekBar.frame = NSRect(x: 10, y: seekY, width: bounds.width - 20, height: 16)
 
-        let btnSize: CGFloat = 30
-        playButton.frame = NSRect(x: 10, y: 2, width: btnSize, height: 24)
+        // 하단 버튼 행: [⏪] [▶] [⏩] | 시간 | ... | [속도] [볼륨]
+        let btnW: CGFloat = 28
+        let btnH: CGFloat = 24
+        let btnY: CGFloat = 2
+        var x: CGFloat = 8
+
+        rewindButton.frame = NSRect(x: x, y: btnY, width: btnW, height: btnH)
+        x += btnW
+        playButton.frame = NSRect(x: x, y: btnY, width: btnW + 2, height: btnH)
+        x += btnW + 2
+        forwardButton.frame = NSRect(x: x, y: btnY, width: btnW, height: btnH)
+        x += btnW + 6
 
         let timeLabelWidth: CGFloat = 130
-        timeLabel.frame = NSRect(x: btnSize + 15, y: 4, width: timeLabelWidth, height: 20)
+        timeLabel.frame = NSRect(x: x, y: 4, width: timeLabelWidth, height: 20)
 
         let volWidth: CGFloat = 80
-        speedLabel.frame = NSRect(x: bounds.width - volWidth - 50, y: 4, width: 40, height: 20)
+        let speedPopupWidth: CGFloat = 60
+        speedPopup.frame = NSRect(x: bounds.width - volWidth - speedPopupWidth - 12, y: 2, width: speedPopupWidth, height: 22)
         volumeSlider.frame = NSRect(x: bounds.width - volWidth - 5, y: 4, width: volWidth, height: 20)
+        speedLabel.frame = .zero
 
         let subHeight: CGFloat = 80
         subtitleLabel.frame = NSRect(x: 40, y: barHeight + 10, width: bounds.width - 80, height: subHeight)
@@ -419,6 +464,20 @@ final class PlayerView: NSView {
     private func adjustSpeed(delta: Float) {
         controller.playbackSpeed = max(0.25, min(4.0, controller.playbackSpeed + delta))
         speedLabel.stringValue = String(format: "%.2fx", controller.playbackSpeed)
+        syncSpeedPopup()
+    }
+
+    private func syncSpeedPopup() {
+        let title = String(format: "%.2gx", controller.playbackSpeed)
+        let idx = speedPopup.indexOfItem(withTitle: title)
+        if idx >= 0 {
+            speedPopup.selectItem(at: idx)
+        } else {
+            // 정확한 프리셋이 없으면 가장 가까운 것 선택
+            let speeds: [Float] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0]
+            let closest = speeds.enumerated().min(by: { abs($0.element - controller.playbackSpeed) < abs($1.element - controller.playbackSpeed) })
+            if let idx = closest?.offset { speedPopup.selectItem(at: idx) }
+        }
     }
 
     // MARK: - 마우스: 창 드래그 이동
@@ -487,6 +546,26 @@ final class PlayerView: NSView {
 
     @objc private func playButtonClicked() {
         playOrResume()
+        window?.makeFirstResponder(self)
+    }
+
+    @objc private func rewindClicked() {
+        controller.seekRelative(seconds: -5)
+        window?.makeFirstResponder(self)
+    }
+
+    @objc private func forwardClicked() {
+        controller.seekRelative(seconds: 5)
+        window?.makeFirstResponder(self)
+    }
+
+    @objc private func speedPopupChanged() {
+        guard let title = speedPopup.selectedItem?.title else { return }
+        let value = title.replacingOccurrences(of: "x", with: "")
+        if let speed = Float(value) {
+            controller.playbackSpeed = speed
+            speedLabel.stringValue = String(format: "%.2fx", speed)
+        }
         window?.makeFirstResponder(self)
     }
 
@@ -714,6 +793,7 @@ final class PlayerView: NSView {
         let speed = Float(sender.tag) / 100.0
         controller.playbackSpeed = speed
         speedLabel.stringValue = String(format: "%.2fx", speed)
+        syncSpeedPopup()
     }
 
     @objc private func contextSetVolume(_ sender: NSMenuItem) {
