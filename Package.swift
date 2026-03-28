@@ -17,6 +17,9 @@ let package = Package(
         .executableTarget(
             name: "iPlayer",
             dependencies: ["CFFmpeg"],
+            resources: [
+                .copy("Resources/YOLOv3Tiny.mlmodelc"),
+            ],
             swiftSettings: [
                 .unsafeFlags([
                     "-I\(ffmpegPath)/include",
@@ -45,6 +48,8 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("QuartzCore"),
                 .linkedFramework("Security"),
+                .linkedFramework("CoreML"),
+                .linkedFramework("Vision"),
             ]
         ),
     ]

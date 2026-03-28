@@ -8,6 +8,11 @@ final class PlayerView: NSView {
 
     // 렌더링 레이어
     private let videoLayer = CALayer()
+    private let detectionLayer = DetectionOverlayLayer()
+
+    // 객체 탐지
+    let objectDetector = ObjectDetector()
+    private var objectDetectionEnabled = false
 
     // 컨트롤 바
     private let controlBar = NSView()
@@ -90,6 +95,9 @@ final class PlayerView: NSView {
         videoLayer.contentsGravity = .resizeAspect
         videoLayer.backgroundColor = NSColor.black.cgColor
         layer?.addSublayer(videoLayer)
+
+        detectionLayer.isHidden = true
+        layer?.addSublayer(detectionLayer)
 
         subtitleLabel.alignment = .center
         subtitleLabel.font = .systemFont(ofSize: 22, weight: .medium)
@@ -232,11 +240,13 @@ final class PlayerView: NSView {
         CATransaction.setDisableActions(true)
         if rotation == 0 {
             videoLayer.transform = CATransform3DIdentity
+            detectionLayer.transform = CATransform3DIdentity
         } else {
             // CALayer는 y-up 좌표계: 양수 = 반시계 방향
             // rotation 값은 "이만큼 시계 방향으로 돌려야 정상"이므로 negate
             let radians = -rotation * .pi / 180.0
             videoLayer.transform = CATransform3DMakeRotation(CGFloat(radians), 0, 0, 1)
+            detectionLayer.transform = videoLayer.transform
         }
         CATransaction.commit()
         needsLayout = true
@@ -266,9 +276,13 @@ final class PlayerView: NSView {
             )
             videoLayer.frame = layerFrame
             videoLayer.bounds = CGRect(x: 0, y: 0, width: layerHeight, height: layerWidth)
+            detectionLayer.frame = layerFrame
+            detectionLayer.bounds = videoLayer.bounds
         } else {
             videoLayer.frame = bounds
             videoLayer.bounds = CGRect(origin: .zero, size: bounds.size)
+            detectionLayer.frame = bounds
+            detectionLayer.bounds = videoLayer.bounds
         }
 
         let barHeight: CGFloat = 50
@@ -304,10 +318,7 @@ final class PlayerView: NSView {
 
         infoOverlay.frame = NSRect(x: 10, y: bounds.height - 180, width: 350, height: 170)
 
-        let meterW: CGFloat = 300
-        let meterH: CGFloat = 200
-        audioMeterView.frame = NSRect(x: bounds.width - meterW - 10, y: bounds.height - meterH - 10,
-                                      width: meterW, height: meterH)
+        // audioMeterView 프레임은 updateAudioMeter()에서 infoOverlay 크기에 비례하여 설정
     }
 
     // MARK: - 렌더링
@@ -316,10 +327,14 @@ final class PlayerView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         if let pixelBuffer = frame.pixelBuffer {
-            // CVPixelBuffer를 IOSurface로 직접 전달 (CIImage/NSImage 변환 제거)
             videoLayer.contents = pixelBuffer
+            if objectDetectionEnabled { objectDetector.processFrame(pixelBuffer) }
         } else if let cgImage = frame.cgImage {
             videoLayer.contents = cgImage
+            if objectDetectionEnabled { objectDetector.processFrame(cgImage) }
+        }
+        if objectDetectionEnabled {
+            detectionLayer.detections = objectDetector.latestResults
         }
         CATransaction.commit()
     }
@@ -396,6 +411,14 @@ final class PlayerView: NSView {
         let data = controller.audioOutput.getDisplayData()
         audioMeterView.update(levelL: data.levelL, levelR: data.levelR,
                               peakL: data.peakL, peakR: data.peakR, pcm: data.pcm)
+
+        // infoOverlay 크기에 비례하여 audioMeterView 크기 결정
+        let overlayFrame = infoOverlay.frame
+        let meterW = overlayFrame.width
+        let meterH = overlayFrame.height
+        let barHeight: CGFloat = 50
+        audioMeterView.frame = NSRect(x: bounds.width - meterW - 10, y: barHeight + 6,
+                                      width: meterW, height: meterH)
         audioMeterView.isHidden = false
     }
 
@@ -607,8 +630,7 @@ final class PlayerView: NSView {
         // 파일이 없으면 최근 파일 목록에서 첫 번째 파일 재생 시도
         let recent = UserDefaults.standard.stringArray(forKey: "iPlayer.recentFiles") ?? []
         guard let lastPath = recent.first else {
-            // 최근 파일도 없음
-            controller.togglePlayPause()
+            // 최근 파일도 없음 → 무시
             return
         }
 
@@ -774,6 +796,14 @@ final class PlayerView: NSView {
 
         menu.addItem(NSMenuItem.separator())
 
+        // 객체 감지
+        let detectTitle = objectDetectionEnabled ? "객체 감지 끄기" : "객체 감지 켜기"
+        let detectItem = NSMenuItem(title: detectTitle, action: #selector(contextToggleObjectDetection), keyEquivalent: "")
+        detectItem.target = self
+        menu.addItem(detectItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         // 전체화면
         let fullscreenTitle = window?.styleMask.contains(.fullScreen) == true ? "전체화면 해제" : "전체화면"
         let fsItem = NSMenuItem(title: fullscreenTitle, action: #selector(contextToggleFullscreen), keyEquivalent: "")
@@ -837,6 +867,18 @@ final class PlayerView: NSView {
 
     @objc private func contextSelectAudioTrack(_ sender: NSMenuItem) {
         controller.selectAudioTrack(index: Int32(sender.tag))
+    }
+
+    @objc private func contextToggleObjectDetection() {
+        objectDetectionEnabled.toggle()
+        objectDetector.isEnabled = objectDetectionEnabled
+        if objectDetectionEnabled {
+            objectDetector.loadModel()
+            detectionLayer.isHidden = false
+        } else {
+            detectionLayer.isHidden = true
+            detectionLayer.detections = []
+        }
     }
 
     @objc private func contextToggleFullscreen() {

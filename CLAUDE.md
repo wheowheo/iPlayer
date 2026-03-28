@@ -10,6 +10,7 @@ macOS용 네이티브 비디오 플레이어. Swift + FFmpeg 8.1 기반.
 - **디코딩**: FFmpeg 8.1 (libavcodec, libavformat, libavutil, libswscale, libswresample)
 - **하드웨어 가속**: VideoToolbox (H.264/H.265/VP9/AV1 HW 디코딩)
 - **오디오 출력**: AudioToolbox / AVAudioEngine
+- **객체 탐지**: CoreML + Vision (YOLOv3Tiny, ANE/GPU 하드웨어 가속)
 - **빌드**: Swift Package Manager
 
 ## 핵심 기능
@@ -86,6 +87,28 @@ macOS용 네이티브 비디오 플레이어. Swift + FFmpeg 8.1 기반.
 - 더블클릭 전체화면 토글
 - 재생 완료 시 자동 정지
 - 트랙 선택 (다중 오디오/자막 트랙)
+
+### 10. 실시간 객체 탐지
+- 우클릭 메뉴에서 "객체 감지 켜기/끄기"로 활성화
+- CoreML + Vision 프레임워크 기반 (외부 CLI 의존성 없음)
+- YOLOv3Tiny 모델 내장 (COCO 80클래스: person, car, dog 등)
+- ANE/GPU 하드웨어 가속으로 실시간 추론
+- 비동기 추론 파이프라인: 비디오 재생을 차단하지 않음
+- 프레임 스킵으로 추론 부하 조절 (기본 3프레임마다 1회)
+- 바운딩 박스 + 클래스 레이블 + 신뢰도 오버레이
+- 비디오 회전에 자동 대응
+
+## 객체 탐지 모델 관리
+- 모델 파일은 `Sources/iPlayer/Resources/YOLOv3Tiny.mlmodelc`에 내장
+- ONNX 모델을 CoreML로 변환하여 사용:
+  ```bash
+  pip install coremltools
+  python -c "import coremltools as ct; model = ct.convert('model.onnx'); model.save('Model.mlmodel')"
+  xcrun coremlcompiler compile Model.mlmodel Sources/iPlayer/Resources/
+  ```
+- 모델 교체 시 `ObjectDetector.swift`의 `findModelURL()` 파일명도 함께 수정
+- CoreML 객체 탐지 모델은 `VNRecognizedObjectObservation`을 출력해야 함
+- 새 모델 추가 시 반드시 `Package.swift`의 `resources`에 `.copy()` 항목 추가
 
 ## 빌드 방법
 ```bash
