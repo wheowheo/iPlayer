@@ -21,6 +21,7 @@ let package = Package(
                 .copy("Resources/YOLOv3Tiny.mlmodelc"),
                 .copy("Resources/YOLOv8n.mlmodelc"),
                 .copy("Resources/MiDaSSmall.mlmodelc"),
+                .copy("Resources/face_mesh.obj"),
             ],
             swiftSettings: [
                 .unsafeFlags([

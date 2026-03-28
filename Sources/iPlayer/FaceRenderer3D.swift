@@ -51,20 +51,41 @@ final class FaceRenderer3D {
         scene.background.contents = NSColor.clear
     }
 
-    /// 2D 이미지를 원통형 3D 메시에 매핑
+    /// 2D 이미지를 내장 3D 얼굴 메시에 매핑
     func loadFromImage(_ image: NSImage) {
         faceNode.childNodes.forEach { $0.removeFromParentNode() }
         faceNode.geometry = nil
 
-        let geometry = createCylindricalFaceMesh()
-        geometry.firstMaterial?.diffuse.contents = image
-        geometry.firstMaterial?.isDoubleSided = true
-        geometry.firstMaterial?.lightingModel = .physicallyBased
-        geometry.firstMaterial?.roughness.contents = 0.7
-        geometry.firstMaterial?.metalness.contents = 0.0
+        // 내장 얼굴 메시 로드 시도
+        let geometry: SCNGeometry
+        if let meshURL = findBuiltInMesh(), let meshScene = try? SCNScene(url: meshURL, options: nil),
+           let meshNode = meshScene.rootNode.childNodes.first, let meshGeo = meshNode.geometry {
+            geometry = meshGeo.copy() as! SCNGeometry
+            log("[3DFace] 내장 메시 로드: face_mesh.obj")
+        } else {
+            geometry = createCylindricalFaceMesh()
+            log("[3DFace] 내장 메시 없음, 절차적 메시 생성")
+        }
+
+        let mat = SCNMaterial()
+        mat.diffuse.contents = image
+        mat.lightingModel = .phong
+        mat.isDoubleSided = true
+        geometry.materials = [mat]
 
         faceNode.geometry = geometry
         faceNode.scale = SCNVector3(1, 1, 1)
+    }
+
+    private func findBuiltInMesh() -> URL? {
+        let execURL = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+        if let bundle = Bundle(url: execURL.appendingPathComponent("iPlayer_iPlayer.bundle")) {
+            if let url = bundle.url(forResource: "face_mesh", withExtension: "obj") { return url }
+        }
+        let srcRes = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Resources")
+        let url = srcRes.appendingPathComponent("face_mesh.obj")
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        return nil
     }
 
     /// .obj 또는 .usdz 3D 모델 로드
