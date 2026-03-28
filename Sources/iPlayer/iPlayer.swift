@@ -42,54 +42,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         window.minSize = NSSize(width: 480, height: 320)
         window.isReleasedWhenClosed = false
         window.delegate = self
-        window.aspectRatio = NSSize(width: 16, height: 9)
 
         playerController = PlayerController()
         playerController.onMediaInfo = { [weak self] info in
+            // 이미 main.async에서 호출됨 — 바로 실행
             guard let self = self, info.displayWidth > 0 && info.displayHeight > 0 else { return }
             let ratio = CGFloat(info.displayWidth) / CGFloat(info.displayHeight)
             self.videoAspectRatio = ratio
-            DispatchQueue.main.async {
-                let screen = self.window.screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
-                let maxW = screen.width * 0.8
-                let maxH = screen.height * 0.8
 
-                var newWidth: CGFloat
-                var newHeight: CGFloat
+            let screen = self.window.screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+            let maxW = screen.width * 0.8
+            let maxH = screen.height * 0.8
 
-                if ratio >= 1.0 {
-                    // 가로 영상: 너비 기준
-                    newWidth = min(CGFloat(info.displayWidth), maxW)
-                    newHeight = newWidth / ratio
-                    if newHeight > maxH {
-                        newHeight = maxH
-                        newWidth = newHeight * ratio
-                    }
-                } else {
-                    // 세로 영상: 높이 기준
-                    newHeight = min(CGFloat(info.displayHeight), maxH)
+            var newWidth: CGFloat
+            var newHeight: CGFloat
+
+            if ratio >= 1.0 {
+                newWidth = min(CGFloat(info.displayWidth), maxW)
+                newHeight = newWidth / ratio
+                if newHeight > maxH {
+                    newHeight = maxH
                     newWidth = newHeight * ratio
-                    if newWidth > maxW {
-                        newWidth = maxW
-                        newHeight = newWidth / ratio
-                    }
                 }
-
-                // minSize를 비율에 맞게 조정 (세로 영상이 minWidth에 걸리지 않도록)
-                if ratio >= 1.0 {
-                    self.window.minSize = NSSize(width: 480, height: 480 / ratio)
-                } else {
-                    self.window.minSize = NSSize(width: 320 * ratio, height: 320)
+            } else {
+                newHeight = min(CGFloat(info.displayHeight), maxH)
+                newWidth = newHeight * ratio
+                if newWidth > maxW {
+                    newWidth = maxW
+                    newHeight = newWidth / ratio
                 }
-                // setContentSize를 먼저 → aspectRatio 적용 시 올바른 크기 유지
-                self.window.setContentSize(NSSize(width: newWidth, height: newHeight))
-                self.window.aspectRatio = NSSize(width: ratio, height: 1.0)
-                self.window.center()
-
-                let name = URL(fileURLWithPath: self.playerController.filePath).lastPathComponent
-                self.window.title = "iPlayer - \(name)"
-                self.addRecentFile(self.playerController.filePath)
             }
+
+            if ratio >= 1.0 {
+                self.window.minSize = NSSize(width: 480, height: 480 / ratio)
+            } else {
+                self.window.minSize = NSSize(width: 320 * ratio, height: 320)
+            }
+            self.window.setContentSize(NSSize(width: newWidth, height: newHeight))
+            self.window.aspectRatio = NSSize(width: ratio, height: 1.0)
+            self.window.center()
+
+            let name = URL(fileURLWithPath: self.playerController.filePath).lastPathComponent
+            self.window.title = "iPlayer - \(name)"
+            self.addRecentFile(self.playerController.filePath)
         }
 
         let playerView = PlayerView(controller: playerController)
