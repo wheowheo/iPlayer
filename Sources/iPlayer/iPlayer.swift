@@ -42,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         window.minSize = NSSize(width: 480, height: 320)
         window.isReleasedWhenClosed = false
         window.delegate = self
+        window.setFrameAutosaveName("iPlayerMainWindow")
 
         playerController = PlayerController()
         playerController.onMediaInfo = { [weak self] info in
