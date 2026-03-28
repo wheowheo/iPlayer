@@ -104,23 +104,18 @@ final class ObjectDetector: @unchecked Sendable {
         guard isEnabled, isLoaded, !isBusy else { return }
 
         // 프레임 큐 깊이에 따른 적응적 스케줄링
-        let skipInterval: Int
+        // isBusy 가드가 자연스러운 속도 제한 — 추론 완료 즉시 다음 프레임 처리
         if queueDepth >= queueDepthHealthy {
-            skipInterval = 3   // 정상: 3프레임마다 탐지
+            // 정상: 매 프레임 시도 (isBusy가 실제 속도 제한)
         } else if queueDepth >= queueDepthReduced {
-            skipInterval = 8   // 감소: 8프레임마다 탐지
+            frameSkipCounter += 1
+            guard frameSkipCounter >= 3 else { return }
+            frameSkipCounter = 0
         } else {
-            // 큐 부족 → 탐지 보류, 비디오 우선
             state = .deferred
             return
         }
 
-        frameSkipCounter += 1
-        guard frameSkipCounter >= skipInterval else { return }
-        frameSkipCounter = 0
-
-        // CVPixelBuffer는 Swift ARC가 retain — 복사 없이 안전하게 전달
-        // (seek 시 videoDecoderLock이 디코더 경합을 방지)
         isBusy = true
         state = .detecting
         let gen = seekGeneration
@@ -136,19 +131,16 @@ final class ObjectDetector: @unchecked Sendable {
     func processFrame(_ cgImage: CGImage, queueDepth: Int) {
         guard isEnabled, isLoaded, !isBusy else { return }
 
-        let skipInterval: Int
         if queueDepth >= queueDepthHealthy {
-            skipInterval = 3
+            // 매 프레임 시도
         } else if queueDepth >= queueDepthReduced {
-            skipInterval = 8
+            frameSkipCounter += 1
+            guard frameSkipCounter >= 3 else { return }
+            frameSkipCounter = 0
         } else {
             state = .deferred
             return
         }
-
-        frameSkipCounter += 1
-        guard frameSkipCounter >= skipInterval else { return }
-        frameSkipCounter = 0
 
         isBusy = true
         state = .detecting

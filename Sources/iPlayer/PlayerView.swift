@@ -30,6 +30,7 @@ final class PlayerView: NSView {
 
     // 정보 오버레이
     private let infoOverlay = NSTextField(labelWithString: "")
+    private let resourceOverlay = NSTextField(labelWithString: "")
     private let audioMeterView = AudioMeterView()
     private var showInfo = false
     private var showDebugger = false
@@ -118,6 +119,16 @@ final class PlayerView: NSView {
         infoOverlay.maximumNumberOfLines = 20
         infoOverlay.isHidden = true
         addSubview(infoOverlay)
+
+        resourceOverlay.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        resourceOverlay.textColor = .cyan
+        resourceOverlay.backgroundColor = NSColor.black.withAlphaComponent(0.7)
+        resourceOverlay.isBordered = false
+        resourceOverlay.isEditable = false
+        resourceOverlay.maximumNumberOfLines = 12
+        resourceOverlay.alignment = .right
+        resourceOverlay.isHidden = true
+        addSubview(resourceOverlay)
 
         audioMeterView.isHidden = true
         addSubview(audioMeterView)
@@ -219,6 +230,7 @@ final class PlayerView: NSView {
             if self.showInfo || self.showDebugger {
                 self.updateInfoOverlay()
                 self.updateAudioMeter()
+                self.updateResourceOverlay()
             }
         }
 
@@ -321,6 +333,7 @@ final class PlayerView: NSView {
         subtitleLabel.frame = NSRect(x: 40, y: barHeight + 10, width: bounds.width - 80, height: subHeight)
 
         infoOverlay.frame = NSRect(x: 10, y: bounds.height - 180, width: 350, height: 170)
+        resourceOverlay.frame = NSRect(x: bounds.width - 230, y: bounds.height - 180, width: 220, height: 170)
 
         // audioMeterView 프레임은 updateAudioMeter()에서 infoOverlay 크기에 비례하여 설정
     }
@@ -415,6 +428,81 @@ final class PlayerView: NSView {
         infoOverlay.frame = NSRect(x: 10, y: bounds.height - height - 10, width: 400, height: height)
     }
 
+    private func updateResourceOverlay() {
+        guard showInfo else {
+            resourceOverlay.isHidden = true
+            return
+        }
+
+        // 메모리 (RSS)
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), intPtr, &count)
+            }
+        }
+        let memMB = kr == KERN_SUCCESS ? Double(info.resident_size) / 1024 / 1024 : 0
+
+        // 프레임 큐
+        let queueDepth = controller.frameQueueDepth
+
+        // 쓰레드 수
+        var threadList: thread_act_array_t?
+        var threadCount: mach_msg_type_number_t = 0
+        let threadKr = task_threads(mach_task_self_, &threadList, &threadCount)
+        if threadKr == KERN_SUCCESS, let list = threadList {
+            vm_deallocate(mach_task_self_, vm_address_t(bitPattern: list), vm_size_t(threadCount) * vm_size_t(MemoryLayout<thread_act_t>.size))
+        }
+
+        // 열 상태
+        let thermal: String
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: thermal = "Normal"
+        case .fair: thermal = "Fair"
+        case .serious: thermal = "Serious"
+        case .critical: thermal = "Critical"
+        @unknown default: thermal = "?"
+        }
+
+        // 탐지 상태
+        let detState: String
+        switch objectDetector.state {
+        case .idle: detState = "Off"
+        case .detecting: detState = "Active"
+        case .deferred: detState = "Deferred"
+        }
+        let detFPS = objectDetector.detectionFPS
+
+        var text = """
+        Resource Monitor
+        ─────────────────
+        Memory: \(String(format: "%.0f", memMB)) MB
+        Threads: \(threadCount)
+        Thermal: \(thermal)
+        ─────────────────
+        Video FPS: \(String(format: "%.1f", controller.currentFPS))
+        Frame Queue: \(queueDepth)
+        Dropped: \(controller.droppedFrames)
+        """
+
+        if objectDetectionEnabled {
+            text += """
+
+            ─────────────────
+            Detect: \(detState)
+            Detect FPS: \(String(format: "%.1f", detFPS))
+            """
+        }
+
+        resourceOverlay.stringValue = text
+        resourceOverlay.isHidden = false
+
+        let height: CGFloat = objectDetectionEnabled ? 210 : 170
+        resourceOverlay.frame = NSRect(x: bounds.width - 200 - 10, y: bounds.height - height - 10,
+                                       width: 200, height: height)
+    }
+
     private func updateAudioMeter() {
         guard showInfo else {
             audioMeterView.isHidden = true
@@ -462,6 +550,7 @@ final class PlayerView: NSView {
             showInfo.toggle()
             updateInfoOverlay()
             updateAudioMeter()
+            updateResourceOverlay()
         case 46: // M
             controller.isMuted.toggle()
         case 31: // O
