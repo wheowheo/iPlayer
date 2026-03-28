@@ -249,9 +249,17 @@ final class PlayerController: @unchecked Sendable {
     func seek(to seconds: Double) {
         guard demuxer.formatCtx != nil else { return }
         let target = max(0, min(seconds, duration))
+
+        // EOF 상태에서 seek → 재생 재개 필요
+        let wasEOF = (state == .paused && demuxEOF)
+
         seekLock.lock()
         seekRequest = target
         seekLock.unlock()
+
+        if wasEOF {
+            play()
+        }
     }
 
     func seekRelative(seconds: Double) {
@@ -653,7 +661,6 @@ final class PlayerController: @unchecked Sendable {
             seekLock.unlock()
 
             if let target = pendingSeek {
-                demuxEOF = false
                 performSeek(to: target)
             }
 
@@ -784,7 +791,7 @@ final class PlayerController: @unchecked Sendable {
             let masterClock = computeMasterClock()
             currentTime = masterClock
 
-            if checkEOF(masterClock: masterClock) { break }
+            if checkEOF(masterClock: masterClock) { continue }
 
             let frameToShow = selectFrame(masterClock: masterClock)
             measureFPS()
@@ -834,7 +841,12 @@ final class PlayerController: @unchecked Sendable {
 
     /// demux 스레드에서만 호출
     private func performSeek(to target: Double) {
-        // 패킷 큐 플러시
+        // EOF 및 stall 상태 리셋
+        demuxEOF = false
+        lastAudioPTS = 0
+        audioStallTime = 0
+
+        // 패킷 큐 플러시 (잔여 flush 패킷 포함)
         flushPacketQueue()
 
         demuxer.seek(to: target)
@@ -847,8 +859,6 @@ final class PlayerController: @unchecked Sendable {
         queueLock.unlock()
 
         currentTime = target
-        lastAudioPTS = 0
-        audioStallTime = 0
         resetClock(fromPTS: target)
 
         DispatchQueue.main.async { [weak self] in
