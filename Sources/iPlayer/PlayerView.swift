@@ -376,9 +376,39 @@ final class PlayerView: NSView {
             showDebugger.toggle()
             controller.dropDebugger.isEnabled = showDebugger
             updateInfoOverlay()
+        case 18: // 1
+            resizeWindow(scale: 0.5)
+        case 19: // 2
+            resizeWindow(scale: 1.0)
+        case 20: // 3
+            resizeWindow(scale: 2.0)
         default:
             super.keyDown(with: event)
         }
+    }
+
+    private func resizeWindow(scale: CGFloat) {
+        guard let info = mediaInfo, info.displayWidth > 0, info.displayHeight > 0,
+              let win = window else { return }
+        let screen = win.screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+
+        var w = CGFloat(info.displayWidth) * scale
+        var h = CGFloat(info.displayHeight) * scale
+
+        // 화면 크기 초과 시 맞춤
+        if w > screen.width || h > screen.height {
+            let ratio = CGFloat(info.displayWidth) / CGFloat(info.displayHeight)
+            if w / screen.width > h / screen.height {
+                w = screen.width
+                h = w / ratio
+            } else {
+                h = screen.height
+                w = h * ratio
+            }
+        }
+
+        win.setContentSize(NSSize(width: w, height: h))
+        win.center()
     }
 
     private func adjustVolume(delta: Float) {
