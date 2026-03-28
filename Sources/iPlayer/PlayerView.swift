@@ -115,24 +115,27 @@ final class PlayerView: NSView {
         addSubview(controlBar)
 
         rewindButton.bezelStyle = .inline
-        rewindButton.title = "⏪"
-        rewindButton.font = .systemFont(ofSize: 14)
+        rewindButton.image = sfSymbol("gobackward.5", size: 14)
+        rewindButton.imagePosition = .imageOnly
+        rewindButton.contentTintColor = .white
         rewindButton.isBordered = false
         rewindButton.target = self
         rewindButton.action = #selector(rewindClicked)
         controlBar.addSubview(rewindButton)
 
         playButton.bezelStyle = .inline
-        playButton.title = "▶"
-        playButton.font = .systemFont(ofSize: 16)
+        playButton.image = sfSymbol("play.fill", size: 16)
+        playButton.imagePosition = .imageOnly
+        playButton.contentTintColor = .white
         playButton.isBordered = false
         playButton.target = self
         playButton.action = #selector(playButtonClicked)
         controlBar.addSubview(playButton)
 
         forwardButton.bezelStyle = .inline
-        forwardButton.title = "⏩"
-        forwardButton.font = .systemFont(ofSize: 14)
+        forwardButton.image = sfSymbol("goforward.5", size: 14)
+        forwardButton.imagePosition = .imageOnly
+        forwardButton.contentTintColor = .white
         forwardButton.isBordered = false
         forwardButton.target = self
         forwardButton.action = #selector(forwardClicked)
@@ -327,9 +330,10 @@ final class PlayerView: NSView {
 
     private func updatePlayButton(state: PlaybackState) {
         switch state {
-        case .playing: playButton.title = "⏸"
-        case .paused: playButton.title = "▶"
-        case .stopped, .idle: playButton.title = "▶"
+        case .playing:
+            playButton.image = sfSymbol("pause.fill", size: 16)
+        case .paused, .stopped, .idle:
+            playButton.image = sfSymbol("play.fill", size: 16)
         }
     }
 
@@ -831,6 +835,12 @@ final class PlayerView: NSView {
     }
 
     // MARK: - 유틸
+
+    private func sfSymbol(_ name: String, size: CGFloat) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: size, weight: .medium)
+        return NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config)
+    }
 
     private func formatTime(_ seconds: Double) -> String {
         guard seconds.isFinite && seconds >= 0 else { return "00:00" }
