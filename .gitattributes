@@ -1,3 +1,1 @@
 Vendor/ffmpeg/lib/*.a filter=lfs diff=lfs merge=lfs -text
-Sample/*.mp4 filter=lfs diff=lfs merge=lfs -text
-Sample/* !text -filter -merge -diff
