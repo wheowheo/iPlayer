@@ -590,12 +590,17 @@ final class PlayerController: @unchecked Sendable {
         let depth = frameRing.count
         var frameToShow: VideoFrame?
 
+        // 배속에 비례하여 드롭 임계값 완화
+        let speedFactor = Double(max(1.0, playbackSpeed))
+        let effectiveDrop = dropThreshold * speedFactor
+        let effectiveShow = showThreshold * speedFactor
+
         dropDebugger.recordQueueDepth(depth, playbackTime: masterClock, masterClock: masterClock)
 
         while let first = frameRing.first {
             let diff = first.pts - masterClock
 
-            if diff < dropThreshold {
+            if diff < effectiveDrop {
                 frameRing.removeFirst()
                 droppedFrames += 1
                 dropDebugger.recordLateDrop(
@@ -606,7 +611,7 @@ final class PlayerController: @unchecked Sendable {
                 frameToShow = first
                 frameRing.removeFirst()
                 break
-            } else if diff <= showThreshold {
+            } else if diff <= effectiveShow {
                 frameToShow = first
                 frameRing.removeFirst()
                 break
@@ -718,15 +723,35 @@ final class PlayerController: @unchecked Sendable {
                 var pkt: UnsafeMutablePointer<AVPacket>? = packet
                 av_packet_free(&pkt)
             } else if packet.pointee.stream_index == demuxer.selectedVideoIndex {
-                // 비디오 패킷 큐 배압: 꽉 차면 대기 (seek 요청 시 즉시 탈출)
-                while isDemuxing && videoPacketQueueSize > maxPacketQueueSize {
-                    seekLock.lock()
-                    let hasPendingSeek = seekRequest != nil
-                    seekLock.unlock()
-                    if hasPendingSeek { break }
-                    dropDebugger.recordBackpressure()
-                    Thread.sleep(forTimeInterval: 0.002)
+                let speed = playbackSpeed
+                let isKeyframe = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
+
+                // 고속 재생(>2x): 키프레임만 디코딩하여 부하 대폭 감소
+                if speed > 2.0 && !isKeyframe {
+                    var pkt: UnsafeMutablePointer<AVPacket>? = packet
+                    av_packet_free(&pkt)
+                    continue
                 }
+
+                // 배압: 큐 만차 시
+                if videoPacketQueueSize > maxPacketQueueSize {
+                    if speed > 1.5 {
+                        // 고속: 대기 대신 드롭 → 오디오 스타베이션 방지
+                        var pkt: UnsafeMutablePointer<AVPacket>? = packet
+                        av_packet_free(&pkt)
+                        continue
+                    }
+                    // 일반 속도: 대기 (seek 요청 시 즉시 탈출)
+                    while isDemuxing && videoPacketQueueSize > maxPacketQueueSize {
+                        seekLock.lock()
+                        let hasPendingSeek = seekRequest != nil
+                        seekLock.unlock()
+                        if hasPendingSeek { break }
+                        dropDebugger.recordBackpressure()
+                        Thread.sleep(forTimeInterval: 0.002)
+                    }
+                }
+
                 enqueueVideoPacket(packet)
                 var pkt: UnsafeMutablePointer<AVPacket>? = packet
                 av_packet_free(&pkt)
