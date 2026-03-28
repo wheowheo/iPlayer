@@ -275,6 +275,15 @@ final class PlayerView: NSView {
             }
         }
 
+        controller.onInputSourceChange = { [weak self] source in
+            guard let self = self else { return }
+            // 카메라 모드: 컨트롤 바 숨김
+            self.controlBar.isHidden = (source == .camera)
+            if source == .camera {
+                self.window?.title = "iPlayer - 카메라: \(self.controller.cameraController.currentDeviceName)"
+            }
+        }
+
         let existingMediaInfo = controller.onMediaInfo
         controller.onMediaInfo = { [weak self] info in
             existingMediaInfo?(info)
@@ -569,54 +578,54 @@ final class PlayerView: NSView {
     // MARK: - 키보드 입력
 
     override func keyDown(with event: NSEvent) {
+        let isCam = controller.inputSource == .camera
+
         switch event.keyCode {
         case 49: // Space
-            playOrResume()
+            if !isCam { playOrResume() }
         case 3: // F
             if event.modifierFlags.contains(.command) {
                 window?.toggleFullScreen(nil)
-            } else {
+            } else if !isCam {
                 controller.stepFrame()
             }
         case 123: // ←
-            controller.seekRelative(seconds: -5)
+            if !isCam { controller.seekRelative(seconds: -5) }
         case 124: // →
-            controller.seekRelative(seconds: 5)
+            if !isCam { controller.seekRelative(seconds: 5) }
         case 126: // ↑
-            adjustVolume(delta: 0.05)
+            if !isCam { adjustVolume(delta: 0.05) }
         case 125: // ↓
-            adjustVolume(delta: -0.05)
+            if !isCam { adjustVolume(delta: -0.05) }
         case 33: // [
-            adjustSpeed(delta: -0.25)
+            if !isCam { adjustSpeed(delta: -0.25) }
         case 30: // ]
-            adjustSpeed(delta: 0.25)
-        case 48: // Tab
+            if !isCam { adjustSpeed(delta: 0.25) }
+        case 48: // Tab (카메라에서도 사용 가능)
             showInfo.toggle()
             updateInfoOverlay()
             updateAudioMeter()
             updateResourceOverlay()
         case 46: // M
-            controller.isMuted.toggle()
+            if !isCam { controller.isMuted.toggle() }
         case 31: // O
             NSApp.sendAction(#selector(AppDelegate.openFileAction(_:)), to: nil, from: self)
         case 53: // Esc
             if let window = self.window, window.styleMask.contains(.fullScreen) {
                 window.toggleFullScreen(nil)
+            } else if isCam {
+                controller.stopCamera()
             } else {
                 controller.stop()
             }
         case 27: // -
-            controller.subtitleOffset -= 0.5
-            log("자막 오프셋: \(controller.subtitleOffset)초")
+            if !isCam { controller.subtitleOffset -= 0.5; log("자막 오프셋: \(controller.subtitleOffset)초") }
         case 24: // =
-            controller.subtitleOffset += 0.5
-            log("자막 오프셋: \(controller.subtitleOffset)초")
+            if !isCam { controller.subtitleOffset += 0.5; log("자막 오프셋: \(controller.subtitleOffset)초") }
         case 15: // R
-            controller.toggleRenderMode()
+            if !isCam { controller.toggleRenderMode() }
         case 2: // D
-            showDebugger.toggle()
-            controller.dropDebugger.isEnabled = showDebugger
-            updateInfoOverlay()
+            if !isCam { showDebugger.toggle(); controller.dropDebugger.isEnabled = showDebugger; updateInfoOverlay() }
         case 18: // 1
             resizeWindow(scale: 0.5)
         case 19: // 2
@@ -847,27 +856,32 @@ final class PlayerView: NSView {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
+        let isCam = controller.inputSource == .camera
 
-        // 재생/일시정지
-        let playTitle = controller.state == .playing ? "일시정지" : "재생"
-        let playItem = NSMenuItem(title: playTitle, action: #selector(contextPlayPause), keyEquivalent: "")
-        playItem.target = self
-        menu.addItem(playItem)
+        if !isCam {
+            // 재생/일시정지 (파일 모드 전용)
+            let playTitle = controller.state == .playing ? "일시정지" : "재생"
+            let playItem = NSMenuItem(title: playTitle, action: #selector(contextPlayPause), keyEquivalent: "")
+            playItem.target = self
+            menu.addItem(playItem)
 
-        // 정지
-        let stopItem = NSMenuItem(title: "정지", action: #selector(contextStop), keyEquivalent: "")
-        stopItem.target = self
-        menu.addItem(stopItem)
+            // 정지
+            let stopItem = NSMenuItem(title: "정지", action: #selector(contextStop), keyEquivalent: "")
+            stopItem.target = self
+            menu.addItem(stopItem)
 
-        menu.addItem(NSMenuItem.separator())
+            menu.addItem(NSMenuItem.separator())
+        }
 
         // 파일 열기
         let openItem = NSMenuItem(title: "파일 열기...", action: #selector(AppDelegate.openFileAction(_:)), keyEquivalent: "")
         menu.addItem(openItem)
 
-        // 자막 열기
-        let subItem = NSMenuItem(title: "자막 열기...", action: #selector(AppDelegate.openSubtitleAction(_:)), keyEquivalent: "")
-        menu.addItem(subItem)
+        if !isCam {
+            // 자막 열기 (파일 모드 전용)
+            let subItem = NSMenuItem(title: "자막 열기...", action: #selector(AppDelegate.openSubtitleAction(_:)), keyEquivalent: "")
+            menu.addItem(subItem)
+        }
 
         // 카메라 입력
         let camMenu = NSMenu()
@@ -897,74 +911,66 @@ final class PlayerView: NSView {
         camMenuItem.submenu = camMenu
         menu.addItem(camMenuItem)
 
-        menu.addItem(NSMenuItem.separator())
+        if !isCam {
+            menu.addItem(NSMenuItem.separator())
 
-        // 배속
-        let speedMenu = NSMenu()
-        for speed: Float in [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0] {
-            let item = NSMenuItem(title: String(format: "%.2fx", speed), action: #selector(contextSetSpeed(_:)), keyEquivalent: "")
-            item.tag = Int(speed * 100)
-            item.target = self
-            if abs(controller.playbackSpeed - speed) < 0.01 {
-                item.state = .on
-            }
-            speedMenu.addItem(item)
-        }
-        let speedMenuItem = NSMenuItem(title: "재생 속도", action: nil, keyEquivalent: "")
-        speedMenuItem.submenu = speedMenu
-        menu.addItem(speedMenuItem)
-
-        // 볼륨
-        let volMenu = NSMenu()
-        for vol in [0, 25, 50, 75, 100, 125, 150, 200] {
-            let title = vol == 0 ? "음소거" : "\(vol)%"
-            let item = NSMenuItem(title: title, action: #selector(contextSetVolume(_:)), keyEquivalent: "")
-            item.tag = vol
-            item.target = self
-            let currentVol = controller.isMuted ? 0 : Int(controller.volume * 100)
-            if vol == currentVol {
-                item.state = .on
-            }
-            volMenu.addItem(item)
-        }
-        let volMenuItem = NSMenuItem(title: "볼륨", action: nil, keyEquivalent: "")
-        volMenuItem.submenu = volMenu
-        menu.addItem(volMenuItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // 오디오 트랙
-        if !controller.demuxer.audioStreams.isEmpty {
-            let audioMenu = NSMenu()
-            for (i, audio) in controller.demuxer.audioStreams.enumerated() {
-                let title = "\(i + 1). \(audio.stream.codecName) \(audio.sampleRate)Hz \(audio.channels)ch"
-                let item = NSMenuItem(title: title, action: #selector(contextSelectAudioTrack(_:)), keyEquivalent: "")
-                item.tag = Int(audio.stream.index)
+            // 배속 (파일 모드 전용)
+            let speedMenu = NSMenu()
+            for speed: Float in [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0] {
+                let item = NSMenuItem(title: String(format: "%.2fx", speed), action: #selector(contextSetSpeed(_:)), keyEquivalent: "")
+                item.tag = Int(speed * 100)
                 item.target = self
-                if audio.stream.index == controller.demuxer.selectedAudioIndex {
-                    item.state = .on
-                }
-                audioMenu.addItem(item)
+                if abs(controller.playbackSpeed - speed) < 0.01 { item.state = .on }
+                speedMenu.addItem(item)
             }
-            let audioMenuItem = NSMenuItem(title: "오디오 트랙", action: nil, keyEquivalent: "")
-            audioMenuItem.submenu = audioMenu
-            menu.addItem(audioMenuItem)
-        }
+            let speedMenuItem = NSMenuItem(title: "재생 속도", action: nil, keyEquivalent: "")
+            speedMenuItem.submenu = speedMenu
+            menu.addItem(speedMenuItem)
 
-        // 자막 트랙
-        if !controller.demuxer.subtitleStreams.isEmpty {
-            let subTrackMenu = NSMenu()
-            for (i, sub) in controller.demuxer.subtitleStreams.enumerated() {
-                let title = "\(i + 1). \(sub.codecName)"
-                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-                if sub.index == controller.demuxer.selectedSubtitleIndex {
-                    item.state = .on
-                }
-                subTrackMenu.addItem(item)
+            // 볼륨
+            let volMenu = NSMenu()
+            for vol in [0, 25, 50, 75, 100, 125, 150, 200] {
+                let title = vol == 0 ? "음소거" : "\(vol)%"
+                let item = NSMenuItem(title: title, action: #selector(contextSetVolume(_:)), keyEquivalent: "")
+                item.tag = vol; item.target = self
+                let currentVol = controller.isMuted ? 0 : Int(controller.volume * 100)
+                if vol == currentVol { item.state = .on }
+                volMenu.addItem(item)
             }
-            let subTrackMenuItem = NSMenuItem(title: "자막 트랙", action: nil, keyEquivalent: "")
-            subTrackMenuItem.submenu = subTrackMenu
-            menu.addItem(subTrackMenuItem)
+            let volMenuItem = NSMenuItem(title: "볼륨", action: nil, keyEquivalent: "")
+            volMenuItem.submenu = volMenu
+            menu.addItem(volMenuItem)
+
+            menu.addItem(NSMenuItem.separator())
+
+            // 오디오 트랙
+            if !controller.demuxer.audioStreams.isEmpty {
+                let audioMenu = NSMenu()
+                for (i, audio) in controller.demuxer.audioStreams.enumerated() {
+                    let title = "\(i + 1). \(audio.stream.codecName) \(audio.sampleRate)Hz \(audio.channels)ch"
+                    let item = NSMenuItem(title: title, action: #selector(contextSelectAudioTrack(_:)), keyEquivalent: "")
+                    item.tag = Int(audio.stream.index); item.target = self
+                    if audio.stream.index == controller.demuxer.selectedAudioIndex { item.state = .on }
+                    audioMenu.addItem(item)
+                }
+                let audioMenuItem = NSMenuItem(title: "오디오 트랙", action: nil, keyEquivalent: "")
+                audioMenuItem.submenu = audioMenu
+                menu.addItem(audioMenuItem)
+            }
+
+            // 자막 트랙
+            if !controller.demuxer.subtitleStreams.isEmpty {
+                let subTrackMenu = NSMenu()
+                for (i, sub) in controller.demuxer.subtitleStreams.enumerated() {
+                    let title = "\(i + 1). \(sub.codecName)"
+                    let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                    if sub.index == controller.demuxer.selectedSubtitleIndex { item.state = .on }
+                    subTrackMenu.addItem(item)
+                }
+                let subTrackMenuItem = NSMenuItem(title: "자막 트랙", action: nil, keyEquivalent: "")
+                subTrackMenuItem.submenu = subTrackMenu
+                menu.addItem(subTrackMenuItem)
+            }
         }
 
         menu.addItem(NSMenuItem.separator())
@@ -1003,24 +1009,25 @@ final class PlayerView: NSView {
         infoItem.target = self
         menu.addItem(infoItem)
 
-        // 드롭 디버거
-        let debugTitle = showDebugger ? "드롭 디버거 끄기" : "드롭 디버거 켜기"
-        let debugItem = NSMenuItem(title: debugTitle, action: #selector(contextToggleDebugger), keyEquivalent: "")
-        debugItem.target = self
-        menu.addItem(debugItem)
+        if !isCam {
+            // 드롭 디버거 (파일 모드 전용)
+            let debugTitle = showDebugger ? "드롭 디버거 끄기" : "드롭 디버거 켜기"
+            let debugItem = NSMenuItem(title: debugTitle, action: #selector(contextToggleDebugger), keyEquivalent: "")
+            debugItem.target = self
+            menu.addItem(debugItem)
 
-        // 렌더 모드
-        let renderMenu = NSMenu()
-        for mode: RenderMode in [.displayLink, .thread] {
-            let item = NSMenuItem(title: mode.rawValue, action: #selector(contextSetRenderMode(_:)), keyEquivalent: "")
-            item.tag = mode == .displayLink ? 0 : 1
-            item.target = self
-            if controller.renderMode == mode { item.state = .on }
-            renderMenu.addItem(item)
+            // 렌더 모드
+            let renderMenu = NSMenu()
+            for mode: RenderMode in [.displayLink, .thread] {
+                let item = NSMenuItem(title: mode.rawValue, action: #selector(contextSetRenderMode(_:)), keyEquivalent: "")
+                item.tag = mode == .displayLink ? 0 : 1; item.target = self
+                if controller.renderMode == mode { item.state = .on }
+                renderMenu.addItem(item)
+            }
+            let renderMenuItem = NSMenuItem(title: "렌더 모드", action: nil, keyEquivalent: "")
+            renderMenuItem.submenu = renderMenu
+            menu.addItem(renderMenuItem)
         }
-        let renderMenuItem = NSMenuItem(title: "렌더 모드", action: nil, keyEquivalent: "")
-        renderMenuItem.submenu = renderMenu
-        menu.addItem(renderMenuItem)
 
         menu.addItem(NSMenuItem.separator())
 
