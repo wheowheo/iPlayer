@@ -191,9 +191,10 @@ final class ObjectDetector: @unchecked Sendable {
         // UV: u=좌우(0~1), v=상하(0=아래, 1=위)
         // FLAME 메시에서: 눈 y≈0.12, 코 y≈-0.04, 입 y≈-0.10, 정수리 y≈0.13, 턱 y≈-0.19
         // 정규화: 눈=(0.35,0.62)/(0.65,0.62), 코=(0.50,0.47), 입=(0.50,0.38)
-        let uvLeftEye = CGPoint(x: 0.35, y: 0.62)
-        let uvRightEye = CGPoint(x: 0.65, y: 0.62)
-        let uvNose = CGPoint(x: 0.50, y: 0.47)
+        // FLAME 메시 정점에서 측정한 실제 UV 좌표
+        let uvLeftEye = CGPoint(x: 0.405, y: 0.761)
+        let uvRightEye = CGPoint(x: 0.598, y: 0.761)
+        let uvNose = CGPoint(x: 0.508, y: 0.554)
 
         // 정렬 텍스처 생성: 사진의 눈/코 위치를 FLAME UV 위치에 맞춤
         guard let alignedTexture = createAlignedTexture(
