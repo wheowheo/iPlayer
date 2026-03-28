@@ -190,7 +190,9 @@ final class PlayerView: NSView {
         if rotation == 0 {
             videoLayer.transform = CATransform3DIdentity
         } else {
-            let radians = rotation * .pi / 180.0
+            // CALayer는 y-up 좌표계: 양수 = 반시계 방향
+            // rotation 값은 "이만큼 시계 방향으로 돌려야 정상"이므로 negate
+            let radians = -rotation * .pi / 180.0
             videoLayer.transform = CATransform3DMakeRotation(CGFloat(radians), 0, 0, 1)
         }
         CATransaction.commit()

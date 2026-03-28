@@ -93,6 +93,9 @@ final class Demuxer {
                     rotation: rotation
                 )
                 videoStreams.append(vInfo)
+                if rotation != 0 {
+                    log("[Demuxer] 비디오 회전: \(rotation)° (\(codecpar.width)x\(codecpar.height) → \(vInfo.displayWidth)x\(vInfo.displayHeight))")
+                }
                 if selectedVideoIndex < 0 { selectedVideoIndex = i }
             case AVMEDIA_TYPE_AUDIO:
                 let aInfo = AudioStreamInfo(
