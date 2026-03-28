@@ -1076,6 +1076,19 @@ final class PlayerView: NSView {
     @objc private func contextSelectDetectorMode(_ sender: NSMenuItem) {
         guard let rawValue = sender.representedObject as? String,
               let mode = DetectorMode.allCases.first(where: { $0.rawValue == rawValue }) else { return }
+
+        // 얼굴 합성: 참조 이미지 선택 필요
+        if mode == .faceSwap {
+            let panel = NSOpenPanel()
+            panel.title = "합성할 얼굴 이미지 선택"
+            panel.allowedContentTypes = [.image]
+            panel.canChooseFiles = true
+            panel.canChooseDirectories = false
+            guard panel.runModal() == .OK, let url = panel.url,
+                  let image = NSImage(contentsOf: url) else { return }
+            objectDetector.setReferenceFace(image: image)
+        }
+
         objectDetectionEnabled = true
         objectDetector.isEnabled = true
         objectDetector.reset()

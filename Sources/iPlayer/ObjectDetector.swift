@@ -15,10 +15,11 @@ enum DetectorMode: String, CaseIterable {
     case handPose = "손 추적 (Hand)"
     case textRecognition = "텍스트 인식 (OCR)"
     case personSegmentation = "인물 분리"
+    case faceSwap = "얼굴 합성 (Face Swap)"
 
     var isBuiltIn: Bool {
         switch self {
-        case .pose, .faceLandmarks, .handPose, .textRecognition, .personSegmentation: return true
+        case .pose, .faceLandmarks, .handPose, .textRecognition, .personSegmentation, .faceSwap: return true
         case .objectDetection, .depth: return false
         }
     }
@@ -80,6 +81,12 @@ struct TextResult {
 
 enum DetectionState { case idle, detecting, deferred }
 
+struct FaceSwapEntry {
+    let warpedFace: CGImage
+    let targetRect: CGRect  // 정규화 좌표
+    let maskRect: CGRect    // 타원 마스크 영역
+}
+
 enum DetectionResult {
     case objects([DetectedObject])
     case poses([PoseResult])
@@ -88,6 +95,7 @@ enum DetectionResult {
     case hands([HandResult])
     case texts([TextResult])
     case segmentation(CGImage)
+    case faceSwap([FaceSwapEntry])
     case empty
 }
 
@@ -97,6 +105,11 @@ final class ObjectDetector: @unchecked Sendable {
     private var vnModel: VNCoreMLModel?
     private var depthModel: VNCoreMLModel?
     private let detectionQueue = DispatchQueue(label: "iPlayer.ObjectDetection", qos: .utility)
+
+    // 얼굴 합성용 참조 이미지
+    private var referenceFace: CGImage?
+    private var referenceLandmarks: (leftEye: CGPoint, rightEye: CGPoint)?  // 정규화 좌표
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     private let resultsLock = NSLock()
     private var _latestResult: DetectionResult = .empty
@@ -124,6 +137,52 @@ final class ObjectDetector: @unchecked Sendable {
     private var fpsTimerStart: Double = 0
 
     var onDetectionUpdate: (() -> Void)?
+
+    // MARK: - 얼굴 합성 참조 설정
+
+    func setReferenceFace(image: NSImage) {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            log("[FaceSwap] 이미지 변환 실패"); return
+        }
+        // 참조 이미지에서 얼굴 랜드마크 추출
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        let req = VNDetectFaceLandmarksRequest()
+        try? handler.perform([req])
+
+        guard let face = req.results?.first,
+              let lm = face.landmarks,
+              let le = lm.leftEye, le.pointCount > 0,
+              let re = lm.rightEye, re.pointCount > 0 else {
+            log("[FaceSwap] 참조 이미지에서 얼굴 감지 실패"); return
+        }
+
+        // 눈 중심 계산 (얼굴 bbox 내 정규화 좌표)
+        let leCenter = (0..<le.pointCount).reduce(CGPoint.zero) { CGPoint(x: $0.x + le.normalizedPoints[$1].x, y: $0.y + le.normalizedPoints[$1].y) }
+        let reCenter = (0..<re.pointCount).reduce(CGPoint.zero) { CGPoint(x: $0.x + re.normalizedPoints[$1].x, y: $0.y + re.normalizedPoints[$1].y) }
+        let leN = CGFloat(le.pointCount), reN = CGFloat(re.pointCount)
+
+        referenceFace = cgImage
+        referenceLandmarks = (
+            leftEye: CGPoint(x: leCenter.x / leN, y: leCenter.y / leN),
+            rightEye: CGPoint(x: reCenter.x / reN, y: reCenter.y / reN)
+        )
+
+        // 참조 이미지를 얼굴 영역만 크롭
+        let bbox = face.boundingBox
+        let cropRect = CGRect(
+            x: bbox.origin.x * CGFloat(cgImage.width),
+            y: (1 - bbox.origin.y - bbox.height) * CGFloat(cgImage.height),
+            width: bbox.width * CGFloat(cgImage.width),
+            height: bbox.height * CGFloat(cgImage.height)
+        )
+        if let cropped = cgImage.cropping(to: cropRect) {
+            referenceFace = cropped
+        }
+
+        log("[FaceSwap] 참조 얼굴 설정 완료 (\(cgImage.width)x\(cgImage.height))")
+    }
+
+    var hasReferenceFace: Bool { referenceFace != nil }
 
     // MARK: - 모델 로드
 
@@ -234,6 +293,7 @@ final class ObjectDetector: @unchecked Sendable {
         case .handPose:        runHandPose(handler: handler, gen: gen)
         case .textRecognition: runTextRecognition(handler: handler, gen: gen)
         case .personSegmentation: runPersonSegmentation(handler: handler, gen: gen)
+        case .faceSwap:          runFaceSwap(handler: handler, gen: gen)
         }
     }
 
@@ -622,6 +682,108 @@ final class ObjectDetector: @unchecked Sendable {
         else if t < 0.75  { let s = (t-0.5)/0.25;  r=s; g=1; b=0 }
         else               { let s = (t-0.75)/0.25; r=1; g=1-s; b=0 }
         return (UInt8(r*255), UInt8(g*255), UInt8(b*255))
+    }
+
+    // MARK: - 얼굴 합성 (Face Swap)
+
+    private func runFaceSwap(handler: VNImageRequestHandler, gen: Int) {
+        guard let refFace = referenceFace else {
+            setResult(.empty); return
+        }
+
+        let req = VNDetectFaceLandmarksRequest()
+        try? handler.perform([req])
+        guard gen == seekGeneration,
+              let observations = req.results, !observations.isEmpty else {
+            setResult(.faceSwap([])); return
+        }
+
+        var entries: [FaceSwapEntry] = []
+        for obs in observations {
+            guard let lm = obs.landmarks,
+                  let le = lm.leftEye, le.pointCount > 0,
+                  let re = lm.rightEye, re.pointCount > 0 else { continue }
+
+            // 비디오 얼굴의 눈 중심 (얼굴 bbox 내 정규화)
+            let leC = eyeCenter(le)
+            let reC = eyeCenter(re)
+
+            // 비디오 상 절대 좌표로 변환
+            let bbox = obs.boundingBox
+            let videoLeAbs = CGPoint(x: bbox.origin.x + leC.x * bbox.width,
+                                      y: bbox.origin.y + leC.y * bbox.height)
+            let videoReAbs = CGPoint(x: bbox.origin.x + reC.x * bbox.width,
+                                      y: bbox.origin.y + reC.y * bbox.height)
+
+            // 워핑: 참조 얼굴을 비디오 얼굴 위치/크기/회전에 맞춤
+            if let warped = warpReferenceFace(refFace, to: bbox,
+                                              videoLeftEye: videoLeAbs, videoRightEye: videoReAbs) {
+                // 마스크 영역: 얼굴 bbox보다 약간 안쪽
+                let inset: CGFloat = 0.08
+                let maskRect = CGRect(x: bbox.origin.x + bbox.width * inset,
+                                       y: bbox.origin.y + bbox.height * inset,
+                                       width: bbox.width * (1 - inset * 2),
+                                       height: bbox.height * (1 - inset * 2))
+                entries.append(FaceSwapEntry(warpedFace: warped, targetRect: bbox, maskRect: maskRect))
+            }
+        }
+        setResult(.faceSwap(entries))
+    }
+
+    private func eyeCenter(_ eye: VNFaceLandmarkRegion2D) -> CGPoint {
+        var sum = CGPoint.zero
+        for i in 0..<eye.pointCount {
+            sum.x += eye.normalizedPoints[i].x
+            sum.y += eye.normalizedPoints[i].y
+        }
+        let n = CGFloat(eye.pointCount)
+        return CGPoint(x: sum.x / n, y: sum.y / n)
+    }
+
+    private func warpReferenceFace(_ refFace: CGImage, to targetBox: CGRect,
+                                    videoLeftEye: CGPoint, videoRightEye: CGPoint) -> CGImage? {
+        let refW = CGFloat(refFace.width)
+        let refH = CGFloat(refFace.height)
+
+        // CIImage로 변환
+        let ciRef = CIImage(cgImage: refFace)
+
+        // 비디오 눈 간 거리와 각도
+        let videoDx = videoRightEye.x - videoLeftEye.x
+        let videoDy = videoRightEye.y - videoLeftEye.y
+        let videoEyeDist = sqrt(videoDx * videoDx + videoDy * videoDy)
+        let videoAngle = atan2(videoDy, videoDx)
+
+        // 참조 눈 간 거리 (참조 이미지가 얼굴만 크롭된 상태이므로 기본 비율 사용)
+        let refEyeDist = refW * 0.35  // 얼굴 너비의 ~35%가 눈 간 거리
+
+        guard videoEyeDist > 0 && refEyeDist > 0 else { return nil }
+
+        // 스케일: 비디오 얼굴 크기에 맞춤 (약간 확대하여 가장자리 커버)
+        let scale = (targetBox.width * 1.1) / (refW / refW)  // bbox 기준
+        let scaleX = targetBox.width * 1.1
+        let scaleY = targetBox.height * 1.1
+
+        // 아핀 변환 적용
+        var transform = CGAffineTransform.identity
+        // 1. 참조 이미지를 원점 중심으로 이동
+        transform = transform.translatedBy(x: -refW / 2, y: -refH / 2)
+        // 2. 스케일
+        transform = transform.scaledBy(x: scaleX / refW, y: scaleY / refH)
+        // 3. 회전
+        transform = transform.rotated(by: videoAngle)
+
+        let transformed = ciRef.transformed(by: transform)
+
+        // 렌더링 크기 (큰 해상도 불필요, 얼굴 영역 크기로 충분)
+        let outW = Int(max(100, scaleX * 500))
+        let outH = Int(max(100, scaleY * 500))
+        let renderRect = CGRect(x: transformed.extent.midX - CGFloat(outW) / 2,
+                                 y: transformed.extent.midY - CGFloat(outH) / 2,
+                                 width: CGFloat(outW), height: CGFloat(outH))
+
+        guard let cgResult = ciContext.createCGImage(transformed, from: renderRect) else { return nil }
+        return cgResult
     }
 
     // MARK: - 공통

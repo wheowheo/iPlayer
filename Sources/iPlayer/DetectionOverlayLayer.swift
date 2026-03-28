@@ -35,6 +35,7 @@ final class DetectionOverlayLayer: CALayer {
         case .hands(let v):        drawHands(v, in: ctx, bounds: b)
         case .texts(let v):        drawTexts(v, in: ctx, bounds: b)
         case .segmentation(let img): ctx.draw(img, in: b)
+        case .faceSwap(let entries): drawFaceSwap(entries, in: ctx, bounds: b)
         case .empty: break
         }
 
@@ -140,6 +141,32 @@ final class DetectionOverlayLayer: CALayer {
             let rect = toRect(t.boundingBox, in: bounds)
             ctx.setStrokeColor(NSColor.systemYellow.cgColor); ctx.setLineWidth(1.5); ctx.stroke(rect)
             drawLabel(t.text, at: CGPoint(x: rect.minX, y: rect.maxY), color: .systemYellow, in: ctx)
+        }
+    }
+
+    // MARK: - 얼굴 합성
+
+    private func drawFaceSwap(_ entries: [FaceSwapEntry], in ctx: CGContext, bounds: CGRect) {
+        for entry in entries {
+            let targetRect = toRect(entry.targetRect, in: bounds)
+            let maskRect = toRect(entry.maskRect, in: bounds)
+
+            ctx.saveGState()
+
+            // 타원형 클리핑 마스크 (부드러운 가장자리)
+            let maskPath = CGPath(ellipseIn: maskRect, transform: nil)
+            ctx.addPath(maskPath)
+            ctx.clip()
+
+            // 워핑된 얼굴 그리기
+            ctx.draw(entry.warpedFace, in: targetRect)
+
+            ctx.restoreGState()
+
+            // 합성 영역 테두리 (디버그용, 반투명)
+            ctx.setStrokeColor(NSColor.systemPurple.withAlphaComponent(0.3).cgColor)
+            ctx.setLineWidth(1)
+            ctx.strokeEllipse(in: maskRect)
         }
     }
 
