@@ -56,6 +56,7 @@ macOS용 네이티브 비디오 플레이어. Swift + FFmpeg 8.1 기반.
 | Tab | 코덱/FPS 정보 오버레이 토글 |
 | M | 음소거 토글 |
 | O | 파일 열기 대화상자 |
+| R | 렌더 모드 전환 (CVDisplayLink ↔ Thread) |
 | Cmd+F | 전체화면 토글 |
 | Esc | 전체화면 해제 / 재생 정지 |
 
@@ -88,6 +89,25 @@ cd /Users/ihatego3/Workspace/iPlayer
 swift build
 swift run iPlayer
 ```
+
+## FFmpeg 정적 라이브러리
+- `Vendor/ffmpeg/`에 FFmpeg 8.1 정적 빌드(.a + 헤더)가 내장되어 있다
+- Homebrew 의존 없이 빌드 가능 (시스템 프레임워크만 사용)
+- FFmpeg 업그레이드 시 소스에서 최소 구성으로 재빌드:
+  - `--enable-static --disable-shared --disable-encoders --disable-muxers --disable-filters --disable-network --disable-avdevice --disable-avfilter --enable-videotoolbox --enable-audiotoolbox`
+  - `--extra-cflags="-mmacosx-version-min=14.0"` 필수 (linker warning 방지)
+
+## 버전 관리
+- `Version.swift`에서 메이저/마이너/패치 관리
+- 브랜치, 커밋 해시, 빌드 번호(커밋 수)는 런타임에 git에서 자동 취득
+- 형식: `메이저.마이너.패치.브랜치.커밋해시.빌드번호` (예: `1.0.0.main.e56d836.11`)
+- 기능 추가 시 마이너 버전 증가, 구조 변경 시 메이저 버전 증가, 버그 수정 시 패치 증가
+
+## 라이브러리 의존성 정보 (자동 관리)
+- "라이브러리 정보" 창은 `Package.swift`를 런타임에 파싱하여 `linkedLibrary`, `linkedFramework` 목록을 자동으로 표시한다
+- FFmpeg 라이브러리 버전은 런타임 API(`avcodec_version()` 등)로 자동 취득한다
+- **라이브러리/프레임워크를 추가하거나 제거할 때 `Package.swift`만 수정하면 정보 창에 자동 반영된다** — `showLibraryInfo()`를 별도로 수정할 필요 없음
+- 새로운 FFmpeg 라이브러리(예: libavfilter)를 추가할 경우, `showLibraryInfo()` 내 `ffmpegVersions` 딕셔너리에 해당 버전 함수를 추가할 것
 
 ## 커밋 규칙
 - 페이즈별로 빌드 성공 + 기본 기능 확인 후 커밋

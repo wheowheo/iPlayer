@@ -1,7 +1,9 @@
 // swift-tools-version: 6.0
 import PackageDescription
+import Foundation
 
-let ffmpegPath = "/opt/homebrew/opt/ffmpeg"
+let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
+let ffmpegPath = "\(packageDir)/Vendor/ffmpeg"
 
 let package = Package(
     name: "iPlayer",
@@ -10,7 +12,7 @@ let package = Package(
         .systemLibrary(
             name: "CFFmpeg",
             pkgConfig: nil,
-            providers: [.brew(["ffmpeg"])]
+            providers: []
         ),
         .executableTarget(
             name: "iPlayer",
@@ -25,13 +27,24 @@ let package = Package(
                     "-L\(ffmpegPath)/lib",
                     "-I\(ffmpegPath)/include",
                 ]),
+                .linkedLibrary("avcodec"),
+                .linkedLibrary("avformat"),
+                .linkedLibrary("avutil"),
+                .linkedLibrary("swscale"),
+                .linkedLibrary("swresample"),
+                .linkedLibrary("z"),
+                .linkedLibrary("bz2"),
+                .linkedLibrary("iconv"),
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("CoreVideo"),
+                .linkedFramework("CoreFoundation"),
+                .linkedFramework("CoreServices"),
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("AppKit"),
                 .linkedFramework("QuartzCore"),
+                .linkedFramework("Security"),
             ]
         ),
     ]

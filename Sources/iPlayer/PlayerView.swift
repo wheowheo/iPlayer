@@ -1,6 +1,7 @@
 import AppKit
 import CoreVideo
 import QuartzCore
+import SwiftUI
 
 final class PlayerView: NSView {
     private let controller: PlayerController
@@ -252,11 +253,8 @@ final class PlayerView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         if let pixelBuffer = frame.pixelBuffer {
-            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-            let rep = NSCIImageRep(ciImage: ciImage)
-            let nsImage = NSImage(size: rep.size)
-            nsImage.addRepresentation(rep)
-            videoLayer.contents = nsImage
+            // CVPixelBuffer를 IOSurface로 직접 전달 (CIImage/NSImage 변환 제거)
+            videoLayer.contents = pixelBuffer
         } else if let cgImage = frame.cgImage {
             videoLayer.contents = cgImage
         }
@@ -303,6 +301,7 @@ final class PlayerView: NSView {
         Audio: \(info.audioCodec) \(info.audioSampleRate)Hz \(info.audioChannels)ch
         Audio Bitrate: \(info.audioBitRate / 1000) kbps
         Decode: \(info.hwAccelerated ? "Hardware (VideoToolbox)" : "Software")
+        Render: \(controller.renderMode.rawValue)
         Speed: \(String(format: "%.2fx", controller.playbackSpeed))
         Dropped: \(controller.droppedFrames) frames
         A/V Drift: \(String(format: "%+.1f", controller.avSyncDrift * 1000))ms
@@ -354,6 +353,8 @@ final class PlayerView: NSView {
         case 24: // =
             controller.subtitleOffset += 0.5
             log("자막 오프셋: \(controller.subtitleOffset)초")
+        case 15: // R
+            controller.toggleRenderMode()
         default:
             super.keyDown(with: event)
         }
@@ -517,6 +518,175 @@ final class PlayerView: NSView {
         }
     }
 
+    // MARK: - 우클릭 컨텍스트 메뉴
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+
+        // 재생/일시정지
+        let playTitle = controller.state == .playing ? "일시정지" : "재생"
+        let playItem = NSMenuItem(title: playTitle, action: #selector(contextPlayPause), keyEquivalent: "")
+        playItem.target = self
+        menu.addItem(playItem)
+
+        // 정지
+        let stopItem = NSMenuItem(title: "정지", action: #selector(contextStop), keyEquivalent: "")
+        stopItem.target = self
+        menu.addItem(stopItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // 파일 열기
+        let openItem = NSMenuItem(title: "파일 열기...", action: #selector(AppDelegate.openFileAction(_:)), keyEquivalent: "")
+        menu.addItem(openItem)
+
+        // 자막 열기
+        let subItem = NSMenuItem(title: "자막 열기...", action: #selector(AppDelegate.openSubtitleAction(_:)), keyEquivalent: "")
+        menu.addItem(subItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // 배속
+        let speedMenu = NSMenu()
+        for speed: Float in [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0] {
+            let item = NSMenuItem(title: String(format: "%.2fx", speed), action: #selector(contextSetSpeed(_:)), keyEquivalent: "")
+            item.tag = Int(speed * 100)
+            item.target = self
+            if abs(controller.playbackSpeed - speed) < 0.01 {
+                item.state = .on
+            }
+            speedMenu.addItem(item)
+        }
+        let speedMenuItem = NSMenuItem(title: "재생 속도", action: nil, keyEquivalent: "")
+        speedMenuItem.submenu = speedMenu
+        menu.addItem(speedMenuItem)
+
+        // 볼륨
+        let volMenu = NSMenu()
+        for vol in [0, 25, 50, 75, 100, 125, 150, 200] {
+            let title = vol == 0 ? "음소거" : "\(vol)%"
+            let item = NSMenuItem(title: title, action: #selector(contextSetVolume(_:)), keyEquivalent: "")
+            item.tag = vol
+            item.target = self
+            let currentVol = controller.isMuted ? 0 : Int(controller.volume * 100)
+            if vol == currentVol {
+                item.state = .on
+            }
+            volMenu.addItem(item)
+        }
+        let volMenuItem = NSMenuItem(title: "볼륨", action: nil, keyEquivalent: "")
+        volMenuItem.submenu = volMenu
+        menu.addItem(volMenuItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // 오디오 트랙
+        if !controller.demuxer.audioStreams.isEmpty {
+            let audioMenu = NSMenu()
+            for (i, audio) in controller.demuxer.audioStreams.enumerated() {
+                let title = "\(i + 1). \(audio.stream.codecName) \(audio.sampleRate)Hz \(audio.channels)ch"
+                let item = NSMenuItem(title: title, action: #selector(contextSelectAudioTrack(_:)), keyEquivalent: "")
+                item.tag = Int(audio.stream.index)
+                item.target = self
+                if audio.stream.index == controller.demuxer.selectedAudioIndex {
+                    item.state = .on
+                }
+                audioMenu.addItem(item)
+            }
+            let audioMenuItem = NSMenuItem(title: "오디오 트랙", action: nil, keyEquivalent: "")
+            audioMenuItem.submenu = audioMenu
+            menu.addItem(audioMenuItem)
+        }
+
+        // 자막 트랙
+        if !controller.demuxer.subtitleStreams.isEmpty {
+            let subTrackMenu = NSMenu()
+            for (i, sub) in controller.demuxer.subtitleStreams.enumerated() {
+                let title = "\(i + 1). \(sub.codecName)"
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                if sub.index == controller.demuxer.selectedSubtitleIndex {
+                    item.state = .on
+                }
+                subTrackMenu.addItem(item)
+            }
+            let subTrackMenuItem = NSMenuItem(title: "자막 트랙", action: nil, keyEquivalent: "")
+            subTrackMenuItem.submenu = subTrackMenu
+            menu.addItem(subTrackMenuItem)
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
+        // 전체화면
+        let fullscreenTitle = window?.styleMask.contains(.fullScreen) == true ? "전체화면 해제" : "전체화면"
+        let fsItem = NSMenuItem(title: fullscreenTitle, action: #selector(contextToggleFullscreen), keyEquivalent: "")
+        fsItem.target = self
+        menu.addItem(fsItem)
+
+        // 정보 오버레이
+        let infoTitle = showInfo ? "정보 숨기기" : "정보 표시"
+        let infoItem = NSMenuItem(title: infoTitle, action: #selector(contextToggleInfo), keyEquivalent: "")
+        infoItem.target = self
+        menu.addItem(infoItem)
+
+        // 렌더 모드
+        let renderMenu = NSMenu()
+        for mode: RenderMode in [.displayLink, .thread] {
+            let item = NSMenuItem(title: mode.rawValue, action: #selector(contextSetRenderMode(_:)), keyEquivalent: "")
+            item.tag = mode == .displayLink ? 0 : 1
+            item.target = self
+            if controller.renderMode == mode { item.state = .on }
+            renderMenu.addItem(item)
+        }
+        let renderMenuItem = NSMenuItem(title: "렌더 모드", action: nil, keyEquivalent: "")
+        renderMenuItem.submenu = renderMenu
+        menu.addItem(renderMenuItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // 라이브러리 정보
+        let libItem = NSMenuItem(title: "라이브러리 정보", action: #selector(AppDelegate.showLibraryInfo(_:)), keyEquivalent: "")
+        menu.addItem(libItem)
+
+        return menu
+    }
+
+    @objc private func contextPlayPause() { playOrResume() }
+    @objc private func contextStop() { controller.stop() }
+
+    @objc private func contextSetSpeed(_ sender: NSMenuItem) {
+        let speed = Float(sender.tag) / 100.0
+        controller.playbackSpeed = speed
+        speedLabel.stringValue = String(format: "%.2fx", speed)
+    }
+
+    @objc private func contextSetVolume(_ sender: NSMenuItem) {
+        let vol = Float(sender.tag) / 100.0
+        if sender.tag == 0 {
+            controller.isMuted = true
+        } else {
+            controller.isMuted = false
+            controller.volume = vol
+            volumeSlider.doubleValue = Double(vol)
+        }
+    }
+
+    @objc private func contextSelectAudioTrack(_ sender: NSMenuItem) {
+        controller.selectAudioTrack(index: Int32(sender.tag))
+    }
+
+    @objc private func contextToggleFullscreen() {
+        window?.toggleFullScreen(nil)
+    }
+
+    @objc private func contextToggleInfo() {
+        showInfo.toggle()
+        updateInfoOverlay()
+    }
+
+    @objc private func contextSetRenderMode(_ sender: NSMenuItem) {
+        controller.renderMode = sender.tag == 0 ? .displayLink : .thread
+    }
+
     // MARK: - 유틸
 
     private func formatTime(_ seconds: Double) -> String {
@@ -592,4 +762,21 @@ final class SeekBar: NSView {
         // 실제 seek 수행 (드래그 중에도 수행하여 화면도 같이 전환)
         onSeek?(fraction)
     }
+}
+
+// MARK: - SwiftUI Preview
+
+struct PlayerViewRepresentable: NSViewRepresentable {
+    let controller: PlayerController
+
+    func makeNSView(context: Context) -> PlayerView {
+        PlayerView(controller: controller)
+    }
+
+    func updateNSView(_ nsView: PlayerView, context: Context) {}
+}
+
+#Preview("iPlayer") {
+    PlayerViewRepresentable(controller: PlayerController())
+        .frame(width: 960, height: 540)
 }

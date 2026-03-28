@@ -5,11 +5,9 @@ import UniformTypeIdentifiers
 @main
 struct iPlayerApp {
     static func main() {
-        let version = avcodec_version()
-        let major = version >> 16
-        let minor = (version >> 8) & 0xFF
-        let micro = version & 0xFF
-        fputs("iPlayer - FFmpeg avcodec \(major).\(minor).\(micro)\n", stderr)
+        fputs("iPlayer \(Version.full)\n", stderr)
+        let codecVer = avcodec_version()
+        fputs("FFmpeg avcodec \(codecVer >> 16).\((codecVer >> 8) & 0xFF).\(codecVer & 0xFF)\n", stderr)
 
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)  // 독립 앱으로 인식 → 포커스 수신 가능
@@ -100,7 +98,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         // App 메뉴
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "iPlayer 정보", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "iPlayer 정보", action: #selector(showAbout(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "라이브러리 정보", action: #selector(showLibraryInfo(_:)), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "iPlayer 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
@@ -154,6 +153,109 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     }
 
     // MARK: - 액션
+
+    @MainActor @objc func showAbout(_ sender: Any) {
+        let codecVer = avcodec_version()
+        let ffmpegStr = "\(codecVer >> 16).\((codecVer >> 8) & 0xFF).\(codecVer & 0xFF)"
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "iPlayer",
+            .applicationVersion: Version.short,
+            .version: "\(Version.full)  (FFmpeg \(ffmpegStr))",
+        ])
+    }
+
+    @MainActor @objc func showLibraryInfo(_ sender: Any) {
+        func ver(_ v: UInt32) -> String { "\(v >> 16).\((v >> 8) & 0xFF).\(v & 0xFF)" }
+
+        // FFmpeg 런타임 버전 조회
+        let ffmpegVersions: [String: String] = [
+            "avcodec": ver(avcodec_version()),
+            "avformat": ver(avformat_version()),
+            "avutil": ver(avutil_version()),
+            "swscale": ver(swscale_version()),
+            "swresample": ver(swresample_version()),
+        ]
+
+        // Package.swift에서 linkedLibrary / linkedFramework 자동 파싱
+        let (linkedLibs, linkedFrameworks) = Self.parsePackageSwift()
+
+        var text = "FFmpeg 8.1 (정적 링크, LGPL 2.1+)\n"
+        text += String(repeating: "─", count: 50) + "\n\n"
+
+        for lib in linkedLibs {
+            if let version = ffmpegVersions[lib] {
+                text += "  lib\(lib)  \(version)\n"
+            } else {
+                text += "  \(lib)\n"
+            }
+        }
+
+        text += "\n\nmacOS 시스템 프레임워크\n"
+        text += String(repeating: "─", count: 50) + "\n\n"
+
+        for fw in linkedFrameworks {
+            text += "  \(fw)\n"
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "라이브러리 의존성"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "확인")
+
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 300))
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+
+        let textView = NSTextView(frame: scrollView.bounds)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.textColor = .labelColor
+        textView.backgroundColor = .textBackgroundColor
+        textView.string = text
+        textView.autoresizingMask = [.width]
+
+        scrollView.documentView = textView
+        alert.accessoryView = scrollView
+        alert.informativeText = ""
+
+        alert.runModal()
+    }
+
+    /// Package.swift를 파싱하여 linkedLibrary, linkedFramework 목록을 반환
+    private static func parsePackageSwift() -> (libs: [String], frameworks: [String]) {
+        let source = URL(fileURLWithPath: #filePath)
+        let projectRoot = source
+            .deletingLastPathComponent() // iPlayer/
+            .deletingLastPathComponent() // Sources/
+            .deletingLastPathComponent() // project root
+        let packageURL = projectRoot.appendingPathComponent("Package.swift")
+
+        guard let content = try? String(contentsOf: packageURL, encoding: .utf8) else {
+            return ([], [])
+        }
+
+        var libs: [String] = []
+        var frameworks: [String] = []
+
+        // .linkedLibrary("name") 패턴
+        let libPattern = try! NSRegularExpression(pattern: #"\.linkedLibrary\("([^"]+)"\)"#)
+        let fwPattern = try! NSRegularExpression(pattern: #"\.linkedFramework\("([^"]+)"\)"#)
+        let range = NSRange(content.startIndex..., in: content)
+
+        for match in libPattern.matches(in: content, range: range) {
+            if let r = Range(match.range(at: 1), in: content) {
+                libs.append(String(content[r]))
+            }
+        }
+        for match in fwPattern.matches(in: content, range: range) {
+            if let r = Range(match.range(at: 1), in: content) {
+                frameworks.append(String(content[r]))
+            }
+        }
+
+        return (libs, frameworks)
+    }
 
     @MainActor @objc func openFileAction(_ sender: Any) {
         let panel = NSOpenPanel()
