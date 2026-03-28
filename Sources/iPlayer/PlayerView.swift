@@ -23,6 +23,7 @@ final class PlayerView: NSView {
     // 정보 오버레이
     private let infoOverlay = NSTextField(labelWithString: "")
     private var showInfo = false
+    private var showDebugger = false
     private var mediaInfo: PlayerController.MediaInfo?
     private var videoRotation: Double = 0
 
@@ -163,7 +164,7 @@ final class PlayerView: NSView {
             if !self.seekBar.isSeeking {
                 self.updateTimeDisplay(current: current, total: total)
             }
-            if self.showInfo {
+            if self.showInfo || self.showDebugger {
                 self.updateInfoOverlay()
             }
         }
@@ -286,28 +287,42 @@ final class PlayerView: NSView {
     }
 
     private func updateInfoOverlay() {
-        guard showInfo else {
+        guard showInfo || showDebugger else {
             infoOverlay.isHidden = true
             return
         }
-        let info = mediaInfo ?? PlayerController.MediaInfo()
-        let rotStr = info.rotation != 0 ? " (rot: \(Int(info.rotation))°)" : ""
-        let text = """
-        Time: \(formatTime(controller.currentTime)) / \(formatTime(controller.duration))
-        FPS: \(String(format: "%.1f", controller.currentFPS))
-        Video: \(info.videoCodec) \(info.width)x\(info.height)\(rotStr)
-        Display: \(info.displayWidth)x\(info.displayHeight)
-        Video Bitrate: \(info.videoBitRate / 1000) kbps
-        Audio: \(info.audioCodec) \(info.audioSampleRate)Hz \(info.audioChannels)ch
-        Audio Bitrate: \(info.audioBitRate / 1000) kbps
-        Decode: \(info.hwAccelerated ? "Hardware (VideoToolbox)" : "Software")
-        Render: \(controller.renderMode.rawValue)
-        Speed: \(String(format: "%.2fx", controller.playbackSpeed))
-        Dropped: \(controller.droppedFrames) frames
-        A/V Drift: \(String(format: "%+.1f", controller.avSyncDrift * 1000))ms
-        """
+        var text = ""
+
+        if showInfo {
+            let info = mediaInfo ?? PlayerController.MediaInfo()
+            let rotStr = info.rotation != 0 ? " (rot: \(Int(info.rotation))°)" : ""
+            text += """
+            Time: \(formatTime(controller.currentTime)) / \(formatTime(controller.duration))
+            FPS: \(String(format: "%.1f", controller.currentFPS))
+            Video: \(info.videoCodec) \(info.width)x\(info.height)\(rotStr)
+            Display: \(info.displayWidth)x\(info.displayHeight)
+            Video Bitrate: \(info.videoBitRate / 1000) kbps
+            Audio: \(info.audioCodec) \(info.audioSampleRate)Hz \(info.audioChannels)ch
+            Audio Bitrate: \(info.audioBitRate / 1000) kbps
+            Decode: \(info.hwAccelerated ? "Hardware (VideoToolbox)" : "Software")
+            Render: \(controller.renderMode.rawValue)
+            Speed: \(String(format: "%.2fx", controller.playbackSpeed))
+            Dropped: \(controller.droppedFrames) frames
+            A/V Drift: \(String(format: "%+.1f", controller.avSyncDrift * 1000))ms
+            """
+        }
+
+        if showDebugger {
+            if showInfo { text += "\n" }
+            text += controller.dropDebugger.summary
+        }
+
         infoOverlay.stringValue = text
         infoOverlay.isHidden = false
+
+        // 디버거 켜지면 오버레이 크기 확장
+        let height: CGFloat = showDebugger ? 340 : 170
+        infoOverlay.frame = NSRect(x: 10, y: bounds.height - height - 10, width: 400, height: height)
     }
 
     // MARK: - 키보드 입력
@@ -355,6 +370,10 @@ final class PlayerView: NSView {
             log("자막 오프셋: \(controller.subtitleOffset)초")
         case 15: // R
             controller.toggleRenderMode()
+        case 2: // D
+            showDebugger.toggle()
+            controller.dropDebugger.isEnabled = showDebugger
+            updateInfoOverlay()
         default:
             super.keyDown(with: event)
         }
@@ -628,6 +647,12 @@ final class PlayerView: NSView {
         infoItem.target = self
         menu.addItem(infoItem)
 
+        // 드롭 디버거
+        let debugTitle = showDebugger ? "드롭 디버거 끄기" : "드롭 디버거 켜기"
+        let debugItem = NSMenuItem(title: debugTitle, action: #selector(contextToggleDebugger), keyEquivalent: "")
+        debugItem.target = self
+        menu.addItem(debugItem)
+
         // 렌더 모드
         let renderMenu = NSMenu()
         for mode: RenderMode in [.displayLink, .thread] {
@@ -685,6 +710,12 @@ final class PlayerView: NSView {
 
     @objc private func contextSetRenderMode(_ sender: NSMenuItem) {
         controller.renderMode = sender.tag == 0 ? .displayLink : .thread
+    }
+
+    @objc private func contextToggleDebugger() {
+        showDebugger.toggle()
+        controller.dropDebugger.isEnabled = showDebugger
+        updateInfoOverlay()
     }
 
     // MARK: - 유틸

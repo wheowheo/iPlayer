@@ -57,6 +57,7 @@ macOS용 네이티브 비디오 플레이어. Swift + FFmpeg 8.1 기반.
 | M | 음소거 토글 |
 | O | 파일 열기 대화상자 |
 | R | 렌더 모드 전환 (CVDisplayLink ↔ Thread) |
+| D | 프레임 드롭 디버거 토글 |
 | Cmd+F | 전체화면 토글 |
 | Esc | 전체화면 해제 / 재생 정지 |
 

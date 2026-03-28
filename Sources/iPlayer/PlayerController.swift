@@ -104,6 +104,9 @@ final class PlayerController: @unchecked Sendable {
     // UI 업데이트 카운터
     private var uiUpdateCounter = 0
 
+    // 프레임 드롭 디버거
+    let dropDebugger = FrameDropDebugger()
+
     struct MediaInfo {
         var videoCodec: String = ""
         var audioCodec: String = ""
@@ -215,6 +218,7 @@ final class PlayerController: @unchecked Sendable {
         subtitles.removeAll()
         currentSubtitle = ""
         hasAudio = false
+        dropDebugger.reset()
         state = .stopped
         onStateChange?(state)
     }
@@ -291,6 +295,7 @@ final class PlayerController: @unchecked Sendable {
         }
         dropThreshold = -frameDuration * 3
         showThreshold = frameDuration * 0.5
+        dropDebugger.setFrameDuration(frameDuration)
     }
 
     // MARK: - 렌더러 전환
@@ -402,6 +407,8 @@ final class PlayerController: @unchecked Sendable {
     private func displayLinkTick() {
         guard state == .playing else { return }
 
+        dropDebugger.recordRenderTick()
+
         let masterClock = computeMasterClock()
         currentTime = masterClock
 
@@ -434,8 +441,15 @@ final class PlayerController: @unchecked Sendable {
                 avSyncDrift = frame.pts - audioOutput.compensatedPTS
             }
 
+            let token = dropDebugger.dispatchBegin()
+            let clock = masterClock
+            queueLock.lock()
+            let qd = frameRing.count
+            queueLock.unlock()
             DispatchQueue.main.async { [weak self] in
-                self?.onFrameReady?(frame)
+                guard let self = self else { return }
+                self.dropDebugger.dispatchEnd(token: token, playbackTime: clock, masterClock: clock, queueDepth: qd)
+                self.onFrameReady?(frame)
             }
         }
 
@@ -466,7 +480,10 @@ final class PlayerController: @unchecked Sendable {
 
     private func selectFrame(masterClock: Double) -> VideoFrame? {
         queueLock.lock()
+        let depth = frameRing.count
         var frameToShow: VideoFrame?
+
+        dropDebugger.recordQueueDepth(depth, playbackTime: masterClock, masterClock: masterClock)
 
         while let first = frameRing.first {
             let diff = first.pts - masterClock
@@ -474,6 +491,10 @@ final class PlayerController: @unchecked Sendable {
             if diff < dropThreshold {
                 frameRing.removeFirst()
                 droppedFrames += 1
+                dropDebugger.recordLateDrop(
+                    framePTS: first.pts, masterClock: masterClock,
+                    diff: diff, queueDepth: depth
+                )
             } else if diff < -frameDuration {
                 frameToShow = first
                 frameRing.removeFirst()
@@ -522,6 +543,7 @@ final class PlayerController: @unchecked Sendable {
             queueLock.unlock()
 
             if queueSize > 120 {
+                dropDebugger.recordBackpressure()
                 Thread.sleep(forTimeInterval: 0.005)
                 continue
             }
@@ -537,7 +559,12 @@ final class PlayerController: @unchecked Sendable {
             }
 
             if packet.pointee.stream_index == demuxer.selectedVideoIndex {
+                dropDebugger.decodeBegin()
                 let frames = videoDecoder.decode(packet: packet)
+                queueLock.lock()
+                let qd = frameRing.count
+                queueLock.unlock()
+                dropDebugger.decodeEnd(playbackTime: currentTime, masterClock: currentTime, queueDepth: qd)
                 if !frames.isEmpty {
                     queueLock.lock()
                     frameRing.append(contentsOf: frames)
@@ -562,6 +589,8 @@ final class PlayerController: @unchecked Sendable {
                 Thread.sleep(forTimeInterval: 0.01)
                 continue
             }
+
+            dropDebugger.recordRenderTick()
 
             let masterClock = computeMasterClock()
             currentTime = masterClock
@@ -592,8 +621,15 @@ final class PlayerController: @unchecked Sendable {
                     avSyncDrift = frame.pts - audioOutput.compensatedPTS
                 }
 
+                let token = dropDebugger.dispatchBegin()
+                let clock = masterClock
+                queueLock.lock()
+                let qd = frameRing.count
+                queueLock.unlock()
                 DispatchQueue.main.async { [weak self] in
-                    self?.onFrameReady?(frame)
+                    guard let self = self else { return }
+                    self.dropDebugger.dispatchEnd(token: token, playbackTime: clock, masterClock: clock, queueDepth: qd)
+                    self.onFrameReady?(frame)
                 }
             }
 
