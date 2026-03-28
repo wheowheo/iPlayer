@@ -75,8 +75,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
                     }
                 }
 
-                self.window.aspectRatio = NSSize(width: ratio, height: 1.0)
+                // minSize를 비율에 맞게 조정 (세로 영상이 minWidth에 걸리지 않도록)
+                if ratio >= 1.0 {
+                    self.window.minSize = NSSize(width: 480, height: 480 / ratio)
+                } else {
+                    self.window.minSize = NSSize(width: 320 * ratio, height: 320)
+                }
+                // setContentSize를 먼저 → aspectRatio 적용 시 올바른 크기 유지
                 self.window.setContentSize(NSSize(width: newWidth, height: newHeight))
+                self.window.aspectRatio = NSSize(width: ratio, height: 1.0)
                 self.window.center()
 
                 let name = URL(fileURLWithPath: self.playerController.filePath).lastPathComponent

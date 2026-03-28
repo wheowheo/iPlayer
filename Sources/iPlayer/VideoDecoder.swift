@@ -105,6 +105,37 @@ final class VideoDecoder {
         avcodec_flush_buffers(ctx)
     }
 
+    /// EOF 시 디코더에 남은 프레임을 모두 꺼냄
+    func drain() -> [VideoFrame] {
+        guard let ctx = codecCtx else { return [] }
+        var frames: [VideoFrame] = []
+
+        // null 패킷 전송 → 디코더 드레인 모드
+        avcodec_send_packet(ctx, nil)
+
+        var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
+        guard frame != nil else { return [] }
+        defer { av_frame_free(&frame) }
+
+        while avcodec_receive_frame(ctx, frame) >= 0 {
+            guard let f = frame else { break }
+            let pts = iplayer_pts_to_seconds(f.pointee.best_effort_timestamp, timeBase)
+
+            if isHardwareAccelerated && f.pointee.format == AV_PIX_FMT_VIDEOTOOLBOX.rawValue {
+                if let pixelBuffer = f.pointee.data.3 {
+                    let cvBuf = Unmanaged<CVPixelBuffer>.fromOpaque(pixelBuffer).retain().takeRetainedValue()
+                    frames.append(VideoFrame(pixelBuffer: cvBuf, pts: pts, width: width, height: height))
+                }
+            } else {
+                if let image = convertFrameToCGImage(f) {
+                    frames.append(VideoFrame(cgImage: image, pts: pts, width: width, height: height))
+                }
+            }
+        }
+
+        return frames
+    }
+
     private func convertFrameToCGImage(_ frame: UnsafeMutablePointer<AVFrame>) -> CGImage? {
         let srcFormat = AVPixelFormat(rawValue: frame.pointee.format)
         let dstFormat = AV_PIX_FMT_BGRA

@@ -238,6 +238,9 @@ final class PlayerController: @unchecked Sendable {
         subtitles.removeAll()
         currentSubtitle = ""
         hasAudio = false
+        demuxEOF = false
+        lastAudioPTS = 0
+        audioStallTime = 0
         dropDebugger.reset()
         state = .stopped
         onStateChange?(state)
@@ -503,10 +506,31 @@ final class PlayerController: @unchecked Sendable {
 
     // MARK: - 공통 렌더 로직
 
+    // 오디오 클럭이 멈춘 것을 감지하기 위한 변수
+    private var lastAudioPTS: Double = 0
+    private var audioStallTime: Double = 0
+
     private func computeMasterClock() -> Double {
         let clock: Double
         if hasAudio && audioOutput.compensatedPTS > 0 {
-            clock = audioOutput.compensatedPTS
+            let audioPTS = audioOutput.compensatedPTS
+            let now = CACurrentMediaTime()
+
+            // 오디오 PTS가 0.5초 이상 변화 없으면 오디오 끝난 것으로 판단 → 벽시계 전환
+            if abs(audioPTS - lastAudioPTS) < 0.001 {
+                if audioStallTime == 0 { audioStallTime = now }
+                if now - audioStallTime > 0.5 {
+                    // 오디오 종료 → 벽시계 기반 클럭
+                    let elapsed = (now - playbackStartWall) * Double(playbackSpeed)
+                    clock = playbackStartPTS + elapsed
+                    return min(clock, duration)
+                }
+            } else {
+                audioStallTime = 0
+                lastAudioPTS = audioPTS
+            }
+
+            clock = audioPTS
         } else {
             let elapsed = (CACurrentMediaTime() - playbackStartWall) * Double(playbackSpeed)
             clock = playbackStartPTS + elapsed
@@ -515,11 +539,15 @@ final class PlayerController: @unchecked Sendable {
     }
 
     private func checkEOF(masterClock: Double) -> Bool {
-        guard duration > 0 && masterClock >= duration - 0.05 else { return false }
+        let clockNearEnd = duration > 0 && masterClock >= duration - 0.1
+        let allDrained = demuxEOF && videoPacketQueueSize == 0
+
         queueLock.lock()
-        let empty = frameRing.isEmpty
+        let frameEmpty = frameRing.isEmpty
         queueLock.unlock()
-        guard empty else { return false }
+
+        guard (clockNearEnd && frameEmpty) || (allDrained && frameEmpty) else { return false }
+
         currentTime = duration
         DispatchQueue.main.async { [weak self] in
             self?.pause()
@@ -609,9 +637,14 @@ final class PlayerController: @unchecked Sendable {
         return size
     }
 
+    // EOF 플래그
+    private var demuxEOF = false
+
     // MARK: - Demux Loop
 
     private func demuxLoop() {
+        demuxEOF = false
+
         while isDemuxing {
             // seek 요청 처리
             seekLock.lock()
@@ -620,7 +653,14 @@ final class PlayerController: @unchecked Sendable {
             seekLock.unlock()
 
             if let target = pendingSeek {
+                demuxEOF = false
                 performSeek(to: target)
+            }
+
+            // 이미 EOF 도달 → 대기
+            if demuxEOF {
+                Thread.sleep(forTimeInterval: 0.05)
+                continue
             }
 
             // 패킷 큐 배압 제어
@@ -631,17 +671,25 @@ final class PlayerController: @unchecked Sendable {
             }
 
             guard let packet = demuxer.readPacket() else {
-                Thread.sleep(forTimeInterval: 0.02)
+                // EOF: 디코더에 flush 신호 전송 (null 패킷)
+                demuxEOF = true
+                // flush 패킷을 큐에 넣어 디코더가 잔여 프레임을 출력하게 함
+                let flushPkt = av_packet_alloc()!
+                flushPkt.pointee.data = nil
+                flushPkt.pointee.size = 0
+                packetQueueLock.lock()
+                videoPacketQueue.append(flushPkt)
+                packetQueueLock.unlock()
+                packetQueueSemaphore.signal()
+                log("[Demux] EOF 도달")
                 continue
             }
 
             if packet.pointee.stream_index == demuxer.selectedVideoIndex {
-                // 비디오 패킷 → 패킷 큐로 전달
                 enqueueVideoPacket(packet)
                 var pkt: UnsafeMutablePointer<AVPacket>? = packet
                 av_packet_free(&pkt)
             } else if packet.pointee.stream_index == demuxer.selectedAudioIndex {
-                // 오디오 패킷 → 즉시 디코딩 (경량)
                 let buffers = audioDecoder.decode(packet: packet)
                 for buf in buffers {
                     audioOutput.enqueue(buffer: buf)
@@ -675,6 +723,18 @@ final class PlayerController: @unchecked Sendable {
             defer {
                 var pkt: UnsafeMutablePointer<AVPacket>? = packet
                 av_packet_free(&pkt)
+            }
+
+            // flush 패킷 (EOF) → 디코더 드레인
+            let isFlush = packet.pointee.data == nil && packet.pointee.size == 0
+            if isFlush {
+                let remaining = videoDecoder.drain()
+                if !remaining.isEmpty {
+                    queueLock.lock()
+                    for frame in remaining { frameRing.append(frame) }
+                    queueLock.unlock()
+                }
+                continue
             }
 
             // 프레임 큐가 꽉 차면 대기
@@ -789,6 +849,8 @@ final class PlayerController: @unchecked Sendable {
         queueLock.unlock()
 
         currentTime = target
+        lastAudioPTS = 0
+        audioStallTime = 0
         resetClock(fromPTS: target)
 
         DispatchQueue.main.async { [weak self] in
