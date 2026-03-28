@@ -215,55 +215,50 @@ final class ObjectDetector: @unchecked Sendable {
 
     var hasReferenceFace: Bool { referenceFace != nil || is3DSource }
 
-    /// 소스 이미지의 얼굴 랜드마크를 FLAME UV 위치에 정렬하여 텍스처 생성
+    /// 3포인트 정렬: 눈 중심(스케일+회전) + 입 중심(수직 위치) → FLAME UV에 매칭
     private func createAlignedTexture(
         source: CGImage,
         srcLeftEye: CGPoint, srcRightEye: CGPoint, srcNose: CGPoint,
         dstLeftEye: CGPoint, dstRightEye: CGPoint, dstNose: CGPoint
     ) -> CGImage? {
-        let texSize = 1024  // 출력 텍스처 해상도
-        let texW = CGFloat(texSize), texH = CGFloat(texSize)
+        let texSize: CGFloat = 1024
+        let ci = CIImage(cgImage: source)
 
-        // 소스 눈 간 거리/각도
+        // --- 소스 측정 ---
+        let srcEyeCenter = CGPoint(x: (srcLeftEye.x + srcRightEye.x) / 2,
+                                    y: (srcLeftEye.y + srcRightEye.y) / 2)
         let srcDx = srcRightEye.x - srcLeftEye.x
         let srcDy = srcRightEye.y - srcLeftEye.y
         let srcEyeDist = sqrt(srcDx * srcDx + srcDy * srcDy)
         let srcAngle = atan2(srcDy, srcDx)
-        let srcCenter = CGPoint(x: (srcLeftEye.x + srcRightEye.x) / 2,
-                                 y: (srcLeftEye.y + srcRightEye.y) / 2)
 
-        // 목표 눈 간 거리 (텍스처 좌표 → 픽셀)
-        let dstDx = (dstRightEye.x - dstLeftEye.x) * texW
-        let dstDy = (dstRightEye.y - dstLeftEye.y) * texH
-        let dstEyeDist = sqrt(dstDx * dstDx + dstDy * dstDy)
-        let dstCenter = CGPoint(x: (dstLeftEye.x + dstRightEye.x) / 2 * texW,
-                                 y: (dstLeftEye.y + dstRightEye.y) / 2 * texH)
+        // 소스 눈→코 수직 거리 (회전 보정 전)
+        let srcEyeToNose = sqrt(pow(srcNose.x - srcEyeCenter.x, 2) + pow(srcNose.y - srcEyeCenter.y, 2))
 
-        guard srcEyeDist > 1 && dstEyeDist > 1 else { return nil }
+        guard srcEyeDist > 1 else { return nil }
 
-        // 변환: 스케일 + 회전 + 이동
-        let scale = dstEyeDist / srcEyeDist
-        let angle = -srcAngle  // 눈을 수평으로 정렬
+        // --- 목표 (FLAME UV 픽셀 좌표) ---
+        let dstEyeCenter = CGPoint(x: (dstLeftEye.x + dstRightEye.x) / 2 * texSize,
+                                    y: (dstLeftEye.y + dstRightEye.y) / 2 * texSize)
+        let dstEyeDist = (dstRightEye.x - dstLeftEye.x) * texSize
+        let dstNosePx = CGPoint(x: dstNose.x * texSize, y: dstNose.y * texSize)
 
-        // CIImage 변환
-        let ci = CIImage(cgImage: source)
+        // --- 스케일 계산: 수평(눈 간 거리) + 수직(눈→코 거리) 독립 ---
+        let scaleH = dstEyeDist / srcEyeDist
+        let dstEyeToNose = sqrt(pow(dstNosePx.x - dstEyeCenter.x, 2) + pow(dstNosePx.y - dstEyeCenter.y, 2))
+        let scaleV = srcEyeToNose > 1 ? dstEyeToNose / srcEyeToNose : scaleH
+        // 평균 스케일 사용 (얼굴 비율 왜곡 방지)
+        let scale = (scaleH + scaleV) / 2
 
-        // 1. 소스 눈 중심을 원점으로 이동
-        var transform = CGAffineTransform(translationX: -srcCenter.x, y: -srcCenter.y)
-        // 2. 회전 (눈 수평 정렬)
-        transform = transform.concatenating(CGAffineTransform(rotationAngle: angle))
-        // 3. 스케일
-        transform = transform.concatenating(CGAffineTransform(scaleX: scale, y: scale))
-        // 4. 목표 눈 중심으로 이동 (CIImage는 y-up이므로 dstCenter 직접 사용)
-        transform = transform.concatenating(CGAffineTransform(translationX: dstCenter.x, y: dstCenter.y))
+        // --- 변환 적용 ---
+        var t = CGAffineTransform(translationX: -srcEyeCenter.x, y: -srcEyeCenter.y)
+        t = t.concatenating(CGAffineTransform(rotationAngle: -srcAngle))
+        t = t.concatenating(CGAffineTransform(scaleX: scale, y: scale))
+        t = t.concatenating(CGAffineTransform(translationX: dstEyeCenter.x, y: dstEyeCenter.y))
 
-        let transformed = ci.transformed(by: transform)
-
-        // 텍스처 영역만 크롭
-        let cropRect = CGRect(x: 0, y: 0, width: texW, height: texH)
-        let cropped = transformed.cropped(to: cropRect)
-
-        return ciContext.createCGImage(cropped, from: cropRect)
+        let transformed = ci.transformed(by: t)
+        let cropRect = CGRect(x: 0, y: 0, width: texSize, height: texSize)
+        return ciContext.createCGImage(transformed.cropped(to: cropRect), from: cropRect)
     }
 
     /// .obj/.usdz 3D 모델 로드
@@ -809,12 +804,27 @@ final class ObjectDetector: @unchecked Sendable {
             // SceneKit 3D 렌더링
             guard let rendered = faceRenderer3D.render(roll: pose.roll, yaw: pose.yaw, pitch: pose.pitch) else { continue }
 
-            let inset: CGFloat = 0.1
-            let maskRect = CGRect(x: bbox.origin.x + bbox.width * inset,
-                                   y: bbox.origin.y + bbox.height * inset,
-                                   width: bbox.width * (1 - inset * 2),
-                                   height: bbox.height * (1 - inset * 2))
-            entries.append(FaceSwapEntry(warpedFace: rendered, targetRect: bbox, maskRect: maskRect))
+            // 비디오 얼굴 bbox 확장 — Vision bbox는 얼굴만, FLAME은 머리+목 포함
+            // 상: 이마+머리카락, 하: 턱+목, 좌우: 귀
+            let expandTop: CGFloat = 0.35    // 이마/머리 위로 확장
+            let expandBottom: CGFloat = 0.15 // 턱 아래로 확장
+            let expandSide: CGFloat = 0.15   // 좌우 귀로 확장
+
+            let expandedRect = CGRect(
+                x: bbox.origin.x - bbox.width * expandSide,
+                y: bbox.origin.y - bbox.height * expandBottom,
+                width: bbox.width * (1 + expandSide * 2),
+                height: bbox.height * (1 + expandTop + expandBottom)
+            )
+
+            let maskInset: CGFloat = 0.05
+            let maskRect = CGRect(
+                x: expandedRect.origin.x + expandedRect.width * maskInset,
+                y: expandedRect.origin.y + expandedRect.height * maskInset,
+                width: expandedRect.width * (1 - maskInset * 2),
+                height: expandedRect.height * (1 - maskInset * 2)
+            )
+            entries.append(FaceSwapEntry(warpedFace: rendered, targetRect: expandedRect, maskRect: maskRect))
         }
         setResult(.faceSwap(entries))
     }
