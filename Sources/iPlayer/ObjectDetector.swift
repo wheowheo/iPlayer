@@ -742,48 +742,23 @@ final class ObjectDetector: @unchecked Sendable {
 
     private func warpReferenceFace(_ refFace: CGImage, to targetBox: CGRect,
                                     videoLeftEye: CGPoint, videoRightEye: CGPoint) -> CGImage? {
-        let refW = CGFloat(refFace.width)
-        let refH = CGFloat(refFace.height)
+        // 스케일링은 DetectionOverlayLayer의 ctx.draw(in: targetRect)가 처리
+        // 여기서는 회전만 적용
 
-        // CIImage로 변환
-        let ciRef = CIImage(cgImage: refFace)
+        let dx = videoRightEye.x - videoLeftEye.x
+        let dy = videoRightEye.y - videoLeftEye.y
+        let angle = atan2(dy, dx)
 
-        // 비디오 눈 간 거리와 각도
-        let videoDx = videoRightEye.x - videoLeftEye.x
-        let videoDy = videoRightEye.y - videoLeftEye.y
-        let videoEyeDist = sqrt(videoDx * videoDx + videoDy * videoDy)
-        let videoAngle = atan2(videoDy, videoDx)
+        // 회전이 거의 없으면 원본 반환 (성능 최적화)
+        if abs(angle) < 0.05 { return refFace }
 
-        // 참조 눈 간 거리 (참조 이미지가 얼굴만 크롭된 상태이므로 기본 비율 사용)
-        let refEyeDist = refW * 0.35  // 얼굴 너비의 ~35%가 눈 간 거리
-
-        guard videoEyeDist > 0 && refEyeDist > 0 else { return nil }
-
-        // 스케일: 비디오 얼굴 크기에 맞춤 (약간 확대하여 가장자리 커버)
-        let scale = (targetBox.width * 1.1) / (refW / refW)  // bbox 기준
-        let scaleX = targetBox.width * 1.1
-        let scaleY = targetBox.height * 1.1
-
-        // 아핀 변환 적용
-        var transform = CGAffineTransform.identity
-        // 1. 참조 이미지를 원점 중심으로 이동
-        transform = transform.translatedBy(x: -refW / 2, y: -refH / 2)
-        // 2. 스케일
-        transform = transform.scaledBy(x: scaleX / refW, y: scaleY / refH)
-        // 3. 회전
-        transform = transform.rotated(by: videoAngle)
-
-        let transformed = ciRef.transformed(by: transform)
-
-        // 렌더링 크기 (큰 해상도 불필요, 얼굴 영역 크기로 충분)
-        let outW = Int(max(100, scaleX * 500))
-        let outH = Int(max(100, scaleY * 500))
-        let renderRect = CGRect(x: transformed.extent.midX - CGFloat(outW) / 2,
-                                 y: transformed.extent.midY - CGFloat(outH) / 2,
-                                 width: CGFloat(outW), height: CGFloat(outH))
-
-        guard let cgResult = ciContext.createCGImage(transformed, from: renderRect) else { return nil }
-        return cgResult
+        // CIImage 회전 (GPU 가속)
+        let ci = CIImage(cgImage: refFace)
+        let rotated = ci
+            .transformed(by: CGAffineTransform(translationX: -ci.extent.midX, y: -ci.extent.midY))
+            .transformed(by: CGAffineTransform(rotationAngle: angle))
+            .transformed(by: CGAffineTransform(translationX: ci.extent.midX, y: ci.extent.midY))
+        return ciContext.createCGImage(rotated, from: rotated.extent)
     }
 
     // MARK: - 공통
