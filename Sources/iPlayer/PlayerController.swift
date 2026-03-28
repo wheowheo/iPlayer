@@ -91,6 +91,9 @@ final class PlayerController: @unchecked Sendable {
     private var frameRing = FrameRingBuffer(capacity: 256)
     private let queueLock = NSLock()
 
+    // 디코더 접근 동기화 (flush ↔ decode 경합 방지)
+    private let videoDecoderLock = NSLock()
+
     // seek 제어
     private var seekRequest: Double? = nil
     private let seekLock = NSLock()
@@ -715,8 +718,12 @@ final class PlayerController: @unchecked Sendable {
                 var pkt: UnsafeMutablePointer<AVPacket>? = packet
                 av_packet_free(&pkt)
             } else if packet.pointee.stream_index == demuxer.selectedVideoIndex {
-                // 비디오 패킷 큐 배압: 꽉 차면 대기 (하지만 패킷은 버리지 않음)
+                // 비디오 패킷 큐 배압: 꽉 차면 대기 (seek 요청 시 즉시 탈출)
                 while isDemuxing && videoPacketQueueSize > maxPacketQueueSize {
+                    seekLock.lock()
+                    let hasPendingSeek = seekRequest != nil
+                    seekLock.unlock()
+                    if hasPendingSeek { break }
                     dropDebugger.recordBackpressure()
                     Thread.sleep(forTimeInterval: 0.002)
                 }
@@ -755,7 +762,9 @@ final class PlayerController: @unchecked Sendable {
             // flush 패킷 (EOF) → 디코더 드레인
             let isFlush = packet.pointee.data == nil && packet.pointee.size == 0
             if isFlush {
+                videoDecoderLock.lock()
                 let remaining = videoDecoder.drain()
+                videoDecoderLock.unlock()
                 if !remaining.isEmpty {
                     queueLock.lock()
                     for frame in remaining { frameRing.append(frame) }
@@ -774,7 +783,9 @@ final class PlayerController: @unchecked Sendable {
             }
 
             dropDebugger.decodeBegin()
+            videoDecoderLock.lock()
             let frames = videoDecoder.decode(packet: packet)
+            videoDecoderLock.unlock()
             queueLock.lock()
             let qd = frameRing.count
             queueLock.unlock()
@@ -875,7 +886,9 @@ final class PlayerController: @unchecked Sendable {
         seekTargetPTS = target
 
         demuxer.seek(to: target)
+        videoDecoderLock.lock()
         videoDecoder.flush()
+        videoDecoderLock.unlock()
         audioDecoder.flush()
         audioOutput.reset()
 

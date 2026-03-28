@@ -132,8 +132,16 @@ final class Demuxer {
 
     func seek(to seconds: Double) {
         guard let ctx = formatCtx else { return }
-        let ts = Int64(seconds * Double(AV_TIME_BASE))
-        av_seek_frame(ctx, -1, ts, AVSEEK_FLAG_BACKWARD)
+
+        if selectedVideoIndex >= 0 {
+            let stream = ctx.pointee.streams[Int(selectedVideoIndex)]!
+            let tb = stream.pointee.time_base
+            let ts = Int64(seconds * Double(tb.den) / Double(tb.num))
+            avformat_seek_file(ctx, selectedVideoIndex, Int64.min, ts, ts, 0)
+        } else {
+            let ts = Int64(seconds * Double(AV_TIME_BASE))
+            avformat_seek_file(ctx, -1, Int64.min, ts, ts, 0)
+        }
     }
 
     func close() {
