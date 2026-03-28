@@ -19,14 +19,14 @@ final class FaceRenderer3D {
         renderer.scene = scene
         renderer.autoenablesDefaultLighting = false
 
-        // 카메라
+        // 카메라 (FLAME 모델 크기에 최적화)
         let camera = SCNCamera()
         camera.usesOrthographicProjection = false
-        camera.fieldOfView = 45
-        camera.zNear = 0.1
+        camera.fieldOfView = 12
+        camera.zNear = 0.01
         camera.zFar = 100
         cameraNode.camera = camera
-        cameraNode.position = SCNVector3(0, 0, 3)
+        cameraNode.position = SCNVector3(0, 0, 1.5)
         scene.rootNode.addChildNode(cameraNode)
 
         // 조명: 방향광
@@ -57,24 +57,42 @@ final class FaceRenderer3D {
         faceNode.geometry = nil
 
         // 내장 얼굴 메시 로드 시도
-        let geometry: SCNGeometry
         if let meshURL = findBuiltInMesh(), let meshScene = try? SCNScene(url: meshURL, options: nil),
            let meshNode = meshScene.rootNode.childNodes.first, let meshGeo = meshNode.geometry {
-            geometry = meshGeo.copy() as! SCNGeometry
-            log("[3DFace] 내장 메시 로드: face_mesh.obj")
+            let geometry = meshGeo.copy() as! SCNGeometry
+            let mat = SCNMaterial()
+            mat.diffuse.contents = image
+            mat.lightingModel = .phong
+            mat.isDoubleSided = true
+            geometry.materials = [mat]
+            faceNode.geometry = geometry
+            log("[3DFace] 내장 메시 로드: \(meshURL.lastPathComponent)")
         } else {
-            geometry = createCylindricalFaceMesh()
-            log("[3DFace] 내장 메시 없음, 절차적 메시 생성")
+            let geometry = createCylindricalFaceMesh()
+            let mat = SCNMaterial()
+            mat.diffuse.contents = image
+            mat.lightingModel = .phong
+            mat.isDoubleSided = true
+            geometry.materials = [mat]
+            faceNode.geometry = geometry
+            log("[3DFace] 절차적 메시 생성")
         }
 
-        let mat = SCNMaterial()
-        mat.diffuse.contents = image
-        mat.lightingModel = .phong
-        mat.isDoubleSided = true
-        geometry.materials = [mat]
-
-        faceNode.geometry = geometry
-        faceNode.scale = SCNVector3(1, 1, 1)
+        // 바운딩 박스로 정규화 — 메시 크기에 관계없이 화면에 꽉 차게
+        let (minB, maxB) = faceNode.boundingBox
+        let sizeX = maxB.x - minB.x
+        let sizeY = maxB.y - minB.y
+        let sizeZ = maxB.z - minB.z
+        let maxDim = max(sizeX, max(sizeY, sizeZ))
+        if maxDim > 0 {
+            let s = 0.3 / maxDim  // 카메라 FOV=12, z=1.5에 맞는 스케일
+            faceNode.scale = SCNVector3(s, s, s)
+        }
+        // 중심 보정
+        let cx = (minB.x + maxB.x) / 2
+        let cy = (minB.y + maxB.y) / 2
+        let cz = (minB.z + maxB.z) / 2
+        faceNode.pivot = SCNMatrix4MakeTranslation(cx, cy, cz)
     }
 
     private func findBuiltInMesh() -> URL? {
