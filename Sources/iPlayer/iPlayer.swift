@@ -50,17 +50,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
             let ratio = CGFloat(info.displayWidth) / CGFloat(info.displayHeight)
             self.videoAspectRatio = ratio
             DispatchQueue.main.async {
-                self.window.aspectRatio = NSSize(width: ratio, height: 1.0)
-                if info.rotation == 90 || info.rotation == 270 {
-                    let screenHeight = self.window.screen?.visibleFrame.height ?? 800
-                    let newHeight = min(CGFloat(info.displayHeight), screenHeight * 0.8)
-                    let newWidth = newHeight * ratio
-                    self.window.setContentSize(NSSize(width: newWidth, height: newHeight))
-                    self.window.center()
+                let screen = self.window.screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+                let maxW = screen.width * 0.8
+                let maxH = screen.height * 0.8
+
+                var newWidth: CGFloat
+                var newHeight: CGFloat
+
+                if ratio >= 1.0 {
+                    // 가로 영상: 너비 기준
+                    newWidth = min(CGFloat(info.displayWidth), maxW)
+                    newHeight = newWidth / ratio
+                    if newHeight > maxH {
+                        newHeight = maxH
+                        newWidth = newHeight * ratio
+                    }
+                } else {
+                    // 세로 영상: 높이 기준
+                    newHeight = min(CGFloat(info.displayHeight), maxH)
+                    newWidth = newHeight * ratio
+                    if newWidth > maxW {
+                        newWidth = maxW
+                        newHeight = newWidth / ratio
+                    }
                 }
+
+                self.window.aspectRatio = NSSize(width: ratio, height: 1.0)
+                self.window.setContentSize(NSSize(width: newWidth, height: newHeight))
+                self.window.center()
+
                 let name = URL(fileURLWithPath: self.playerController.filePath).lastPathComponent
                 self.window.title = "iPlayer - \(name)"
-                // 최근 파일에 추가
                 self.addRecentFile(self.playerController.filePath)
             }
         }
