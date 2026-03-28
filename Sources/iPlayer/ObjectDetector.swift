@@ -704,22 +704,23 @@ final class ObjectDetector: @unchecked Sendable {
                   let le = lm.leftEye, le.pointCount > 0,
                   let re = lm.rightEye, re.pointCount > 0 else { continue }
 
-            // 비디오 얼굴의 눈 중심 (얼굴 bbox 내 정규화)
-            let leC = eyeCenter(le)
-            let reC = eyeCenter(re)
-
-            // 비디오 상 절대 좌표로 변환
             let bbox = obs.boundingBox
-            let videoLeAbs = CGPoint(x: bbox.origin.x + leC.x * bbox.width,
-                                      y: bbox.origin.y + leC.y * bbox.height)
-            let videoReAbs = CGPoint(x: bbox.origin.x + reC.x * bbox.width,
-                                      y: bbox.origin.y + reC.y * bbox.height)
+            let leC = eyeCenter(le), reC = eyeCenter(re)
 
-            // 워핑: 참조 얼굴을 비디오 얼굴 위치/크기/회전에 맞춤
-            if let warped = warpReferenceFace(refFace, to: bbox,
-                                              videoLeftEye: videoLeAbs, videoRightEye: videoReAbs) {
-                // 마스크 영역: 얼굴 bbox보다 약간 안쪽
-                let inset: CGFloat = 0.08
+            // 얼굴 bbox 내 정규화 좌표
+            let noseC: CGPoint
+            if let nose = lm.nose, nose.pointCount > 0 {
+                noseC = landmarkCenter(nose)
+            } else {
+                noseC = CGPoint(x: 0.5, y: 0.4)
+            }
+
+            // 3D 머리 포즈 추정
+            let pose = estimateHeadPose(leftEye: leC, rightEye: reC, nose: noseC)
+
+            // 3D 원근 워핑
+            if let warped = warp3D(refFace, pose: pose) {
+                let inset: CGFloat = 0.1
                 let maskRect = CGRect(x: bbox.origin.x + bbox.width * inset,
                                        y: bbox.origin.y + bbox.height * inset,
                                        width: bbox.width * (1 - inset * 2),
@@ -730,35 +731,123 @@ final class ObjectDetector: @unchecked Sendable {
         setResult(.faceSwap(entries))
     }
 
+    // MARK: - 3D 머리 포즈 추정
+
+    private struct HeadPose {
+        let roll: CGFloat   // Z축 회전 (좌우 기울임)
+        let yaw: CGFloat    // Y축 회전 (좌우 돌림)
+        let pitch: CGFloat  // X축 회전 (상하 끄덕임)
+    }
+
+    private func estimateHeadPose(leftEye: CGPoint, rightEye: CGPoint, nose: CGPoint) -> HeadPose {
+        // Roll: 눈 기울기
+        let roll = atan2(rightEye.y - leftEye.y, rightEye.x - leftEye.x)
+
+        // Yaw: 코 위치가 눈 중심에서 얼마나 벗어났는지
+        // 정면일 때 nose.x ≈ 0.5, 좌회전 시 < 0.5, 우회전 시 > 0.5
+        let eyeMidX = (leftEye.x + rightEye.x) / 2
+        let yaw = (nose.x - eyeMidX) * 3.0  // -1.5 ~ +1.5 rad 범위로 확대
+
+        // Pitch: 코가 눈보다 얼마나 아래에 있는지
+        let eyeMidY = (leftEye.y + rightEye.y) / 2
+        let eyeDist = abs(rightEye.x - leftEye.x)
+        let noseDropRatio = (eyeMidY - nose.y) / max(eyeDist, 0.01)
+        let pitch = (noseDropRatio - 0.6) * 2.0  // 기본값 0.6에서 편차
+
+        return HeadPose(roll: roll, yaw: yaw, pitch: pitch)
+    }
+
+    // MARK: - 3D 원근 워핑
+
+    private func warp3D(_ refFace: CGImage, pose: HeadPose) -> CGImage? {
+        let w = CGFloat(refFace.width)
+        let h = CGFloat(refFace.height)
+
+        // 3D 회전 → 2D 원근 투영
+        // 사각형 4개 꼭짓점을 3D 회전 후 투영
+        let corners = perspectiveCorners(width: w, height: h, pose: pose)
+
+        let ci = CIImage(cgImage: refFace)
+        guard let filter = CIFilter(name: "CIPerspectiveTransform") else { return refFace }
+
+        // CIFilter 좌표: 이미지 좌하단 원점
+        filter.setValue(ci, forKey: kCIInputImageKey)
+        filter.setValue(CIVector(cgPoint: corners.topLeft), forKey: "inputTopLeft")
+        filter.setValue(CIVector(cgPoint: corners.topRight), forKey: "inputTopRight")
+        filter.setValue(CIVector(cgPoint: corners.bottomLeft), forKey: "inputBottomLeft")
+        filter.setValue(CIVector(cgPoint: corners.bottomRight), forKey: "inputBottomRight")
+
+        guard let output = filter.outputImage else { return refFace }
+        return ciContext.createCGImage(output, from: output.extent)
+    }
+
+    private struct Corners {
+        let topLeft: CGPoint, topRight: CGPoint
+        let bottomLeft: CGPoint, bottomRight: CGPoint
+    }
+
+    private func perspectiveCorners(width w: CGFloat, height h: CGFloat, pose: HeadPose) -> Corners {
+        // 원본 꼭짓점 (CIImage 좌표: y-up)
+        var tl = SIMD3<Double>(0, Double(h), 0)
+        var tr = SIMD3<Double>(Double(w), Double(h), 0)
+        var bl = SIMD3<Double>(0, 0, 0)
+        var br = SIMD3<Double>(Double(w), 0, 0)
+
+        let cx = Double(w) / 2, cy = Double(h) / 2
+
+        // 중심으로 이동
+        tl -= SIMD3(cx, cy, 0); tr -= SIMD3(cx, cy, 0)
+        bl -= SIMD3(cx, cy, 0); br -= SIMD3(cx, cy, 0)
+
+        // Yaw (Y축 회전)
+        let yaw = Double(pose.yaw)
+        let cosY = cos(yaw), sinY = sin(yaw)
+        func rotateY(_ p: SIMD3<Double>) -> SIMD3<Double> {
+            SIMD3(p.x * cosY + p.z * sinY, p.y, -p.x * sinY + p.z * cosY)
+        }
+        tl = rotateY(tl); tr = rotateY(tr); bl = rotateY(bl); br = rotateY(br)
+
+        // Pitch (X축 회전)
+        let pitch = Double(pose.pitch)
+        let cosP = cos(pitch), sinP = sin(pitch)
+        func rotateX(_ p: SIMD3<Double>) -> SIMD3<Double> {
+            SIMD3(p.x, p.y * cosP - p.z * sinP, p.y * sinP + p.z * cosP)
+        }
+        tl = rotateX(tl); tr = rotateX(tr); bl = rotateX(bl); br = rotateX(br)
+
+        // Roll (Z축 회전)
+        let roll = Double(pose.roll)
+        let cosR = cos(roll), sinR = sin(roll)
+        func rotateZ(_ p: SIMD3<Double>) -> SIMD3<Double> {
+            SIMD3(p.x * cosR - p.y * sinR, p.x * sinR + p.y * cosR, p.z)
+        }
+        tl = rotateZ(tl); tr = rotateZ(tr); bl = rotateZ(bl); br = rotateZ(br)
+
+        // 원근 투영 (가상 카메라 거리)
+        let focalLength = Double(w) * 2.0
+        func project(_ p: SIMD3<Double>) -> CGPoint {
+            let scale = focalLength / (focalLength - p.z)
+            return CGPoint(x: p.x * scale + cx, y: p.y * scale + cy)
+        }
+
+        return Corners(
+            topLeft: project(tl), topRight: project(tr),
+            bottomLeft: project(bl), bottomRight: project(br)
+        )
+    }
+
     private func eyeCenter(_ eye: VNFaceLandmarkRegion2D) -> CGPoint {
         var sum = CGPoint.zero
-        for i in 0..<eye.pointCount {
-            sum.x += eye.normalizedPoints[i].x
-            sum.y += eye.normalizedPoints[i].y
-        }
+        for i in 0..<eye.pointCount { sum.x += eye.normalizedPoints[i].x; sum.y += eye.normalizedPoints[i].y }
         let n = CGFloat(eye.pointCount)
         return CGPoint(x: sum.x / n, y: sum.y / n)
     }
 
-    private func warpReferenceFace(_ refFace: CGImage, to targetBox: CGRect,
-                                    videoLeftEye: CGPoint, videoRightEye: CGPoint) -> CGImage? {
-        // 스케일링은 DetectionOverlayLayer의 ctx.draw(in: targetRect)가 처리
-        // 여기서는 회전만 적용
-
-        let dx = videoRightEye.x - videoLeftEye.x
-        let dy = videoRightEye.y - videoLeftEye.y
-        let angle = atan2(dy, dx)
-
-        // 회전이 거의 없으면 원본 반환 (성능 최적화)
-        if abs(angle) < 0.05 { return refFace }
-
-        // CIImage 회전 (GPU 가속)
-        let ci = CIImage(cgImage: refFace)
-        let rotated = ci
-            .transformed(by: CGAffineTransform(translationX: -ci.extent.midX, y: -ci.extent.midY))
-            .transformed(by: CGAffineTransform(rotationAngle: angle))
-            .transformed(by: CGAffineTransform(translationX: ci.extent.midX, y: ci.extent.midY))
-        return ciContext.createCGImage(rotated, from: rotated.extent)
+    private func landmarkCenter(_ region: VNFaceLandmarkRegion2D) -> CGPoint {
+        var sum = CGPoint.zero
+        for i in 0..<region.pointCount { sum.x += region.normalizedPoints[i].x; sum.y += region.normalizedPoints[i].y }
+        let n = CGFloat(region.pointCount)
+        return CGPoint(x: sum.x / n, y: sum.y / n)
     }
 
     // MARK: - 공통
