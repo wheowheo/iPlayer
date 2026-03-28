@@ -146,7 +146,7 @@ final class ObjectDetector: @unchecked Sendable {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             log("[FaceSwap] 이미지 변환 실패"); return
         }
-        // 참조 이미지에서 얼굴 랜드마크 추출
+        // 얼굴 랜드마크 추출
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         let req = VNDetectFaceLandmarksRequest()
         try? handler.perform([req])
@@ -158,37 +158,113 @@ final class ObjectDetector: @unchecked Sendable {
             log("[FaceSwap] 참조 이미지에서 얼굴 감지 실패"); return
         }
 
-        // 눈 중심 계산 (얼굴 bbox 내 정규화 좌표)
-        let leCenter = (0..<le.pointCount).reduce(CGPoint.zero) { CGPoint(x: $0.x + le.normalizedPoints[$1].x, y: $0.y + le.normalizedPoints[$1].y) }
-        let reCenter = (0..<re.pointCount).reduce(CGPoint.zero) { CGPoint(x: $0.x + re.normalizedPoints[$1].x, y: $0.y + re.normalizedPoints[$1].y) }
-        let leN = CGFloat(le.pointCount), reN = CGFloat(re.pointCount)
-
-        referenceFace = cgImage
-        referenceLandmarks = (
-            leftEye: CGPoint(x: leCenter.x / leN, y: leCenter.y / leN),
-            rightEye: CGPoint(x: reCenter.x / reN, y: reCenter.y / reN)
-        )
-
-        // 참조 이미지를 얼굴 영역만 크롭
+        // 눈 중심 (이미지 절대 좌표)
         let bbox = face.boundingBox
-        let cropRect = CGRect(
-            x: bbox.origin.x * CGFloat(cgImage.width),
-            y: (1 - bbox.origin.y - bbox.height) * CGFloat(cgImage.height),
-            width: bbox.width * CGFloat(cgImage.width),
-            height: bbox.height * CGFloat(cgImage.height)
-        )
-        if let cropped = cgImage.cropping(to: cropRect) {
-            referenceFace = cropped
+        let imgW = CGFloat(cgImage.width), imgH = CGFloat(cgImage.height)
+
+        func absPoint(_ region: VNFaceLandmarkRegion2D) -> CGPoint {
+            var sum = CGPoint.zero
+            for i in 0..<region.pointCount {
+                sum.x += region.normalizedPoints[i].x
+                sum.y += region.normalizedPoints[i].y
+            }
+            let n = CGFloat(region.pointCount)
+            return CGPoint(
+                x: (bbox.origin.x + sum.x / n * bbox.width) * imgW,
+                y: (bbox.origin.y + sum.y / n * bbox.height) * imgH
+            )
         }
 
-        // 3D 렌더러에도 로드 (2D 이미지 → 원통형 메시 매핑)
-        faceRenderer3D.loadFromImage(image)
+        let leftEyeAbs = absPoint(le)
+        let rightEyeAbs = absPoint(re)
+
+        // 코/입 중심 (있으면)
+        let noseAbs: CGPoint
+        if let nose = lm.nose, nose.pointCount > 0 { noseAbs = absPoint(nose) }
+        else { noseAbs = CGPoint(x: (leftEyeAbs.x + rightEyeAbs.x) / 2, y: leftEyeAbs.y - (rightEyeAbs.x - leftEyeAbs.x) * 0.6) }
+
+        let mouthAbs: CGPoint
+        if let mouth = lm.outerLips, mouth.pointCount > 0 { mouthAbs = absPoint(mouth) }
+        else { mouthAbs = CGPoint(x: noseAbs.x, y: noseAbs.y - (rightEyeAbs.x - leftEyeAbs.x) * 0.4) }
+
+        // FLAME 정면 투영 UV 기준 랜드마크 위치 (메시 분석에서 측정)
+        // UV: u=좌우(0~1), v=상하(0=아래, 1=위)
+        // FLAME 메시에서: 눈 y≈0.12, 코 y≈-0.04, 입 y≈-0.10, 정수리 y≈0.13, 턱 y≈-0.19
+        // 정규화: 눈=(0.35,0.62)/(0.65,0.62), 코=(0.50,0.47), 입=(0.50,0.38)
+        let uvLeftEye = CGPoint(x: 0.35, y: 0.62)
+        let uvRightEye = CGPoint(x: 0.65, y: 0.62)
+        let uvNose = CGPoint(x: 0.50, y: 0.47)
+
+        // 정렬 텍스처 생성: 사진의 눈/코 위치를 FLAME UV 위치에 맞춤
+        guard let alignedTexture = createAlignedTexture(
+            source: cgImage,
+            srcLeftEye: leftEyeAbs, srcRightEye: rightEyeAbs, srcNose: noseAbs,
+            dstLeftEye: uvLeftEye, dstRightEye: uvRightEye, dstNose: uvNose
+        ) else {
+            log("[FaceSwap] 텍스처 정렬 실패"); return
+        }
+
+        referenceFace = alignedTexture
+        let alignedNS = NSImage(cgImage: alignedTexture, size: NSSize(width: alignedTexture.width, height: alignedTexture.height))
+
+        faceRenderer3D.loadFromImage(alignedNS)
         is3DSource = true
 
-        log("[FaceSwap] 3D 얼굴 설정 완료 (\(cgImage.width)x\(cgImage.height))")
+        log("[FaceSwap] 3D 얼굴 설정 완료 (정렬됨, \(alignedTexture.width)x\(alignedTexture.height))")
     }
 
     var hasReferenceFace: Bool { referenceFace != nil || is3DSource }
+
+    /// 소스 이미지의 얼굴 랜드마크를 FLAME UV 위치에 정렬하여 텍스처 생성
+    private func createAlignedTexture(
+        source: CGImage,
+        srcLeftEye: CGPoint, srcRightEye: CGPoint, srcNose: CGPoint,
+        dstLeftEye: CGPoint, dstRightEye: CGPoint, dstNose: CGPoint
+    ) -> CGImage? {
+        let texSize = 1024  // 출력 텍스처 해상도
+        let texW = CGFloat(texSize), texH = CGFloat(texSize)
+
+        // 소스 눈 간 거리/각도
+        let srcDx = srcRightEye.x - srcLeftEye.x
+        let srcDy = srcRightEye.y - srcLeftEye.y
+        let srcEyeDist = sqrt(srcDx * srcDx + srcDy * srcDy)
+        let srcAngle = atan2(srcDy, srcDx)
+        let srcCenter = CGPoint(x: (srcLeftEye.x + srcRightEye.x) / 2,
+                                 y: (srcLeftEye.y + srcRightEye.y) / 2)
+
+        // 목표 눈 간 거리 (텍스처 좌표 → 픽셀)
+        let dstDx = (dstRightEye.x - dstLeftEye.x) * texW
+        let dstDy = (dstRightEye.y - dstLeftEye.y) * texH
+        let dstEyeDist = sqrt(dstDx * dstDx + dstDy * dstDy)
+        let dstCenter = CGPoint(x: (dstLeftEye.x + dstRightEye.x) / 2 * texW,
+                                 y: (dstLeftEye.y + dstRightEye.y) / 2 * texH)
+
+        guard srcEyeDist > 1 && dstEyeDist > 1 else { return nil }
+
+        // 변환: 스케일 + 회전 + 이동
+        let scale = dstEyeDist / srcEyeDist
+        let angle = -srcAngle  // 눈을 수평으로 정렬
+
+        // CIImage 변환
+        let ci = CIImage(cgImage: source)
+
+        // 1. 소스 눈 중심을 원점으로 이동
+        var transform = CGAffineTransform(translationX: -srcCenter.x, y: -srcCenter.y)
+        // 2. 회전 (눈 수평 정렬)
+        transform = transform.concatenating(CGAffineTransform(rotationAngle: angle))
+        // 3. 스케일
+        transform = transform.concatenating(CGAffineTransform(scaleX: scale, y: scale))
+        // 4. 목표 눈 중심으로 이동 (CIImage는 y-up이므로 dstCenter 직접 사용)
+        transform = transform.concatenating(CGAffineTransform(translationX: dstCenter.x, y: dstCenter.y))
+
+        let transformed = ci.transformed(by: transform)
+
+        // 텍스처 영역만 크롭
+        let cropRect = CGRect(x: 0, y: 0, width: texW, height: texH)
+        let cropped = transformed.cropped(to: cropRect)
+
+        return ciContext.createCGImage(cropped, from: cropRect)
+    }
 
     /// .obj/.usdz 3D 모델 로드
     func setReference3DModel(url: URL) {
