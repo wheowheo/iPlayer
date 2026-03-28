@@ -14,6 +14,11 @@ final class PlayerView: NSView {
     let objectDetector = ObjectDetector()
     private var objectDetectionEnabled = false
 
+    // 버퍼링 스피너
+    private let bufferingView = NSView()
+    private let bufferingSpinner = NSProgressIndicator()
+    private let bufferingLabel = NSTextField(labelWithString: "버퍼링...")
+
     // 컨트롤 바
     private let controlBar = NSView()
     private let rewindButton = NSButton()
@@ -130,6 +135,26 @@ final class PlayerView: NSView {
         resourceOverlay.isHidden = true
         addSubview(resourceOverlay)
 
+        // 버퍼링 스피너
+        bufferingView.wantsLayer = true
+        bufferingView.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.5).cgColor
+        bufferingView.layer?.cornerRadius = 12
+        bufferingView.isHidden = true
+        addSubview(bufferingView)
+
+        bufferingSpinner.style = .spinning
+        bufferingSpinner.controlSize = .regular
+        bufferingSpinner.startAnimation(nil)
+        bufferingView.addSubview(bufferingSpinner)
+
+        bufferingLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        bufferingLabel.textColor = .white
+        bufferingLabel.backgroundColor = .clear
+        bufferingLabel.isBordered = false
+        bufferingLabel.isEditable = false
+        bufferingLabel.alignment = .center
+        bufferingView.addSubview(bufferingLabel)
+
         audioMeterView.isHidden = true
         addSubview(audioMeterView)
 
@@ -242,6 +267,14 @@ final class PlayerView: NSView {
             self?.updatePlayButton(state: state)
         }
 
+        controller.onBuffering = { [weak self] buffering in
+            guard let self = self else { return }
+            self.bufferingView.isHidden = !buffering
+            if buffering {
+                self.bufferingSpinner.startAnimation(nil)
+            }
+        }
+
         let existingMediaInfo = controller.onMediaInfo
         controller.onMediaInfo = { [weak self] info in
             existingMediaInfo?(info)
@@ -334,6 +367,13 @@ final class PlayerView: NSView {
 
         infoOverlay.frame = NSRect(x: 10, y: bounds.height - 180, width: 350, height: 170)
         resourceOverlay.frame = NSRect(x: bounds.width - 230, y: bounds.height - 180, width: 220, height: 170)
+
+        // 버퍼링 스피너 (중앙)
+        let bufW: CGFloat = 120, bufH: CGFloat = 70
+        bufferingView.frame = NSRect(x: (bounds.width - bufW) / 2, y: (bounds.height - bufH) / 2,
+                                     width: bufW, height: bufH)
+        bufferingSpinner.frame = NSRect(x: (bufW - 32) / 2, y: 28, width: 32, height: 32)
+        bufferingLabel.frame = NSRect(x: 0, y: 6, width: bufW, height: 18)
 
         // audioMeterView 프레임은 updateAudioMeter()에서 infoOverlay 크기에 비례하여 설정
     }

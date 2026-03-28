@@ -47,6 +47,11 @@ final class PlayerController: @unchecked Sendable {
     var onStateChange: ((PlaybackState) -> Void)?
     var onMediaInfo: ((MediaInfo) -> Void)?
     var onRenderModeChange: ((RenderMode) -> Void)?
+    var onBuffering: ((Bool) -> Void)?  // true=버퍼링 시작, false=버퍼링 종료
+
+    // 버퍼링 상태
+    private(set) var isBuffering = false
+    private var bufferingStartTime: Double = 0
 
     // 렌더 모드
     var renderMode: RenderMode = .displayLink {
@@ -262,6 +267,7 @@ final class PlayerController: @unchecked Sendable {
         demuxEOF = false
         lastAudioPTS = 0
         audioStallTime = 0
+        isBuffering = false
         dropDebugger.reset()
         state = .stopped
         onStateChange?(state)
@@ -499,6 +505,31 @@ final class PlayerController: @unchecked Sendable {
 
         if checkEOF(masterClock: masterClock) { return }
 
+        // 버퍼링 감지: 프레임 큐가 비어있고 EOF 아님
+        queueLock.lock()
+        let queueEmpty = frameRing.isEmpty
+        let qd = frameRing.count
+        queueLock.unlock()
+
+        if queueEmpty && !demuxEOF {
+            if !isBuffering {
+                isBuffering = true
+                bufferingStartTime = CACurrentMediaTime()
+                if hasAudio { audioOutput.pause() }
+                DispatchQueue.main.async { [weak self] in self?.onBuffering?(true) }
+            }
+            // 버퍼링 중: 클럭 정지, 프레임 대기
+            return
+        }
+
+        if isBuffering && qd >= 5 {
+            // 버퍼 충분 → 재개
+            isBuffering = false
+            if hasAudio { audioOutput.resume() }
+            resetClock(fromPTS: currentTime)
+            DispatchQueue.main.async { [weak self] in self?.onBuffering?(false) }
+        }
+
         let frameToShow = selectFrame(masterClock: masterClock)
         measureFPS()
 
@@ -512,9 +543,6 @@ final class PlayerController: @unchecked Sendable {
 
             let token = dropDebugger.dispatchBegin()
             let clock = masterClock
-            queueLock.lock()
-            let qd = frameRing.count
-            queueLock.unlock()
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.dropDebugger.dispatchEnd(token: token, playbackTime: clock, masterClock: clock, queueDepth: qd)
@@ -590,33 +618,53 @@ final class PlayerController: @unchecked Sendable {
         let depth = frameRing.count
         var frameToShow: VideoFrame?
 
-        // 배속에 비례하여 드롭 임계값 완화
-        let speedFactor = Double(max(1.0, playbackSpeed))
+        let speed = Double(playbackSpeed)
+        let speedFactor = max(1.0, speed)
         let effectiveDrop = dropThreshold * speedFactor
         let effectiveShow = showThreshold * speedFactor
 
         dropDebugger.recordQueueDepth(depth, playbackTime: masterClock, masterClock: masterClock)
 
-        while let first = frameRing.first {
-            let diff = first.pts - masterClock
+        if speed > 2.0 {
+            // 고속 모드: 큐에서 가장 가까운 프레임을 찾아 표시
+            // 클럭보다 앞선 프레임이 나올 때까지 드롭하되, 마지막 프레임은 표시
+            var lastCandidate: VideoFrame? = nil
+            while let first = frameRing.first {
+                let diff = first.pts - masterClock
+                if diff <= effectiveShow {
+                    lastCandidate = first
+                    frameRing.removeFirst()
+                    if diff >= -frameDuration { break }
+                } else {
+                    break
+                }
+            }
+            if let candidate = lastCandidate {
+                frameToShow = candidate
+            }
+        } else {
+            // 일반 모드: 정밀 동기화
+            while let first = frameRing.first {
+                let diff = first.pts - masterClock
 
-            if diff < effectiveDrop {
-                frameRing.removeFirst()
-                droppedFrames += 1
-                dropDebugger.recordLateDrop(
-                    framePTS: first.pts, masterClock: masterClock,
-                    diff: diff, queueDepth: depth
-                )
-            } else if diff < -frameDuration {
-                frameToShow = first
-                frameRing.removeFirst()
-                break
-            } else if diff <= effectiveShow {
-                frameToShow = first
-                frameRing.removeFirst()
-                break
-            } else {
-                break
+                if diff < effectiveDrop {
+                    frameRing.removeFirst()
+                    droppedFrames += 1
+                    dropDebugger.recordLateDrop(
+                        framePTS: first.pts, masterClock: masterClock,
+                        diff: diff, queueDepth: depth
+                    )
+                } else if diff < -frameDuration {
+                    frameToShow = first
+                    frameRing.removeFirst()
+                    break
+                } else if diff <= effectiveShow {
+                    frameToShow = first
+                    frameRing.removeFirst()
+                    break
+                } else {
+                    break
+                }
             }
         }
         queueLock.unlock()
@@ -851,6 +899,30 @@ final class PlayerController: @unchecked Sendable {
 
             if checkEOF(masterClock: masterClock) { continue }
 
+            // 버퍼링 감지
+            queueLock.lock()
+            let queueEmpty = frameRing.isEmpty
+            let qd = frameRing.count
+            queueLock.unlock()
+
+            if queueEmpty && !demuxEOF {
+                if !isBuffering {
+                    isBuffering = true
+                    bufferingStartTime = CACurrentMediaTime()
+                    if hasAudio { audioOutput.pause() }
+                    DispatchQueue.main.async { [weak self] in self?.onBuffering?(true) }
+                }
+                Thread.sleep(forTimeInterval: 0.01)
+                continue
+            }
+
+            if isBuffering && qd >= 5 {
+                isBuffering = false
+                if hasAudio { audioOutput.resume() }
+                resetClock(fromPTS: currentTime)
+                DispatchQueue.main.async { [weak self] in self?.onBuffering?(false) }
+            }
+
             let frameToShow = selectFrame(masterClock: masterClock)
             measureFPS()
 
@@ -864,9 +936,6 @@ final class PlayerController: @unchecked Sendable {
 
                 let token = dropDebugger.dispatchBegin()
                 let clock = masterClock
-                queueLock.lock()
-                let qd = frameRing.count
-                queueLock.unlock()
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
                     self.dropDebugger.dispatchEnd(token: token, playbackTime: clock, masterClock: clock, queueDepth: qd)
