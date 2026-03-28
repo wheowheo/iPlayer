@@ -272,7 +272,7 @@ final class FrameDropDebugger: @unchecked Sendable {
         if totalDrops > 0 {
             lines.append(String(format: "Drops: %d total", totalDrops))
             for (reason, count) in dropsByReason.sorted(by: { $0.value > $1.value }) where count > 0 {
-                lines.append(String(format: "  %@: %d", reason.rawValue, count))
+                lines.append("  \(reason.rawValue): \(count)")
             }
 
             // 주요 병목 진단
@@ -322,6 +322,52 @@ final class FrameDropDebugger: @unchecked Sendable {
         case .mainThreadBusy:
             return "메인 스레드 병목 (max \(String(format: "%.0f", maxDispatchLatency))ms) → UI 업데이트 과부하"
         }
+    }
+
+    /// stderr로 전체 리포트 출력
+    func printReport(file: String, renderMode: String, renderedFrames: Int, droppedFrames: Int) {
+        var lines: [String] = []
+        lines.append("══════════════════════════════════════════")
+        lines.append("Drop Debugger Report: \(file)")
+        lines.append("Render Mode: \(renderMode)")
+        lines.append("──────────────────────────────────────────")
+        lines.append(String(format: "Rendered: %d  Dropped: %d  (%.1f%%)",
+                            renderedFrames, droppedFrames,
+                            renderedFrames + droppedFrames > 0
+                            ? Double(droppedFrames) / Double(renderedFrames + droppedFrames) * 100 : 0))
+        lines.append(String(format: "Decode: avg %.2fms / max %.2fms (frame limit %.2fms)",
+                            avgDecodeTime, maxDecodeTime, frameDuration))
+        lines.append(String(format: "Render interval: avg %.2fms / max %.2fms",
+                            avgRenderInterval, maxRenderInterval))
+        lines.append(String(format: "Dispatch latency: avg %.2fms / max %.2fms",
+                            avgDispatchLatency, maxDispatchLatency))
+        lines.append(String(format: "Queue depth: %d ~ %d",
+                            minQueueDepth == Int.max ? 0 : minQueueDepth, maxQueueDepth))
+        lines.append(String(format: "Queue starvation: %d  Backpressure: %d",
+                            queueStarvationCount, backpressureCount))
+
+        let totalDrops = dropsByReason.values.reduce(0, +)
+        if totalDrops > 0 {
+            lines.append("Drop reasons:")
+            for (reason, count) in dropsByReason.sorted(by: { $0.value > $1.value }) where count > 0 {
+                let padded = reason.rawValue.padding(toLength: 20, withPad: " ", startingAt: 0)
+                lines.append("  \(padded) \(count)")
+            }
+            lines.append("Bottleneck: \(diagnoseBottleneck())")
+        }
+
+        // 최근 드롭 이벤트 (최대 10개)
+        let recent = recentEvents(count: 10)
+        if !recent.isEmpty {
+            lines.append("Recent drops:")
+            for e in recent {
+                lines.append(String(format: "  [%.1fs] \(e.reason.rawValue) q=%d | \(e.detail)",
+                                    e.time, e.queueDepth))
+            }
+        }
+
+        lines.append("══════════════════════════════════════════")
+        fputs(lines.joined(separator: "\n") + "\n", stderr)
     }
 
     // MARK: - 내부

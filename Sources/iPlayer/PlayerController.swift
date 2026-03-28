@@ -60,12 +60,20 @@ final class PlayerController: @unchecked Sendable {
         }
     }
 
-    // 스레드
-    private var readThread: Thread?
+    // --- 스레드 ---
+    // demux 스레드: 패킷 읽기 + 오디오 디코딩
+    private var demuxThread: Thread?
+    private var isDemuxing = false
+    private let demuxThreadDone = DispatchSemaphore(value: 0)
+
+    // 비디오 디코딩 전용 스레드
+    private var decodeThread: Thread?
+    private var isDecoding = false
+    private let decodeThreadDone = DispatchSemaphore(value: 0)
+
+    // 렌더 스레드 (Thread 모드)
     private var renderThread: Thread?
-    private var isReading = false
     private var isRendering = false
-    private let readThreadDone = DispatchSemaphore(value: 0)
     private let renderThreadDone = DispatchSemaphore(value: 0)
 
     // CVDisplayLink
@@ -73,11 +81,17 @@ final class PlayerController: @unchecked Sendable {
     private var displayLinkRunning = false
     private var displayLinkSelfPtr: UnsafeMutableRawPointer?
 
-    // 프레임 큐 (원형 버퍼 - removeFirst O(1))
+    // --- 비디오 패킷 큐 ---
+    private var videoPacketQueue: [UnsafeMutablePointer<AVPacket>] = []
+    private let packetQueueLock = NSLock()
+    private let packetQueueSemaphore = DispatchSemaphore(value: 0)
+    private let maxPacketQueueSize = 120
+
+    // 프레임 큐 (원형 버퍼)
     private var frameRing = FrameRingBuffer(capacity: 256)
     private let queueLock = NSLock()
 
-    // seek 제어: read thread가 직접 수행
+    // seek 제어
     private var seekRequest: Double? = nil
     private let seekLock = NSLock()
 
@@ -106,6 +120,10 @@ final class PlayerController: @unchecked Sendable {
 
     // 프레임 드롭 디버거
     let dropDebugger = FrameDropDebugger()
+
+    // 프리버퍼링 완료 시그널
+    private let prebufferReady = DispatchSemaphore(value: 0)
+    private var prebufferTarget: Int = 15  // 프리버퍼링 목표 프레임 수
 
     struct MediaInfo {
         var videoCodec: String = ""
@@ -150,9 +168,7 @@ final class PlayerController: @unchecked Sendable {
             }
         }
 
-        // 프레임 타이밍 계산
         updateFrameTiming()
-
         loadSubtitleAutomatic(videoPath: path)
 
         let info = buildMediaInfo()
@@ -169,8 +185,10 @@ final class PlayerController: @unchecked Sendable {
 
         if state == .idle || state == .stopped {
             if hasAudio { _ = audioOutput.start() }
-            startReadThread()
-            Thread.sleep(forTimeInterval: 0.15)
+            startDemuxThread()
+            startDecodeThread()
+            // 적응적 프리버퍼링: 목표 프레임 수만큼 채운 후 렌더 시작
+            _ = prebufferReady.wait(timeout: .now() + 1.0)
             startRenderer()
         } else if state == .paused {
             if hasAudio { audioOutput.resume() }
@@ -197,7 +215,9 @@ final class PlayerController: @unchecked Sendable {
 
     func stop() {
         stopRenderer()
-        stopReadThread()
+        stopDecodeThread()
+        stopDemuxThread()
+        flushPacketQueue()
 
         audioOutput.stop()
         videoDecoder.close()
@@ -296,6 +316,13 @@ final class PlayerController: @unchecked Sendable {
         dropThreshold = -frameDuration * 3
         showThreshold = frameDuration * 0.5
         dropDebugger.setFrameDuration(frameDuration)
+
+        // 60fps 이상이면 프리버퍼 목표를 높임
+        if frameDuration <= 1.0 / 50.0 {
+            prebufferTarget = 30  // 60fps: 0.5초
+        } else {
+            prebufferTarget = 15  // 30fps: 0.5초
+        }
     }
 
     // MARK: - 렌더러 전환
@@ -314,25 +341,49 @@ final class PlayerController: @unchecked Sendable {
         stopRenderThread()
     }
 
-    // MARK: - 스레드 관리
+    // MARK: - Demux 스레드
 
-    private func startReadThread() {
-        isReading = true
-        readThread = Thread { [weak self] in
-            self?.readLoop()
-            self?.readThreadDone.signal()
+    private func startDemuxThread() {
+        isDemuxing = true
+        demuxThread = Thread { [weak self] in
+            self?.demuxLoop()
+            self?.demuxThreadDone.signal()
         }
-        readThread?.name = "iPlayer.Read"
-        readThread?.qualityOfService = .userInteractive
-        readThread?.start()
+        demuxThread?.name = "iPlayer.Demux"
+        demuxThread?.qualityOfService = .userInteractive
+        demuxThread?.start()
     }
 
-    private func stopReadThread() {
-        guard isReading else { return }
-        isReading = false
-        readThreadDone.wait()
-        readThread = nil
+    private func stopDemuxThread() {
+        guard isDemuxing else { return }
+        isDemuxing = false
+        packetQueueSemaphore.signal() // decode 스레드가 대기 중일 수 있으므로 깨움
+        demuxThreadDone.wait()
+        demuxThread = nil
     }
+
+    // MARK: - Video Decode 스레드
+
+    private func startDecodeThread() {
+        isDecoding = true
+        decodeThread = Thread { [weak self] in
+            self?.videoDecodeLoop()
+            self?.decodeThreadDone.signal()
+        }
+        decodeThread?.name = "iPlayer.VideoDecode"
+        decodeThread?.qualityOfService = .userInteractive
+        decodeThread?.start()
+    }
+
+    private func stopDecodeThread() {
+        guard isDecoding else { return }
+        isDecoding = false
+        packetQueueSemaphore.signal()
+        decodeThreadDone.wait()
+        decodeThread = nil
+    }
+
+    // MARK: - Render 스레드 (Thread 모드)
 
     private func startRenderThread() {
         guard !isRendering else { return }
@@ -391,46 +442,32 @@ final class PlayerController: @unchecked Sendable {
 
     private func stopDisplayLink() {
         guard displayLinkRunning, let link = displayLink else { return }
-        CVDisplayLinkStop(link)
         displayLinkRunning = false
+        CVDisplayLinkStop(link)
+        displayLink = nil
 
         if let ptr = displayLinkSelfPtr {
-            Unmanaged<PlayerController>.fromOpaque(ptr).release()
             displayLinkSelfPtr = nil
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) {
+                Unmanaged<PlayerController>.fromOpaque(ptr).release()
+            }
         }
 
-        displayLink = nil
         log("[Render] CVDisplayLink 정지")
     }
 
-    /// CVDisplayLink 콜백 - 디스플레이 vsync마다 호출 (별도 스레드)
+    /// CVDisplayLink 콜백
     private func displayLinkTick() {
-        guard state == .playing else { return }
+        guard displayLinkRunning, state == .playing else { return }
 
         dropDebugger.recordRenderTick()
 
         let masterClock = computeMasterClock()
         currentTime = masterClock
 
-        // EOF 감지
-        if duration > 0 && masterClock >= duration - 0.05 {
-            queueLock.lock()
-            let empty = frameRing.isEmpty
-            queueLock.unlock()
-            if empty {
-                currentTime = duration
-                DispatchQueue.main.async { [weak self] in
-                    self?.pause()
-                    self?.onTimeUpdate?(self?.duration ?? 0, self?.duration ?? 0)
-                }
-                return
-            }
-        }
+        if checkEOF(masterClock: masterClock) { return }
 
-        // 프레임 선택
         let frameToShow = selectFrame(masterClock: masterClock)
-
-        // FPS 측정
         measureFPS()
 
         if let frame = frameToShow {
@@ -453,7 +490,6 @@ final class PlayerController: @unchecked Sendable {
             }
         }
 
-        // UI 업데이트 (vsync 5회마다 ≈ ~83ms @60Hz)
         uiUpdateCounter += 1
         if uiUpdateCounter >= 5 {
             uiUpdateCounter = 0
@@ -476,6 +512,20 @@ final class PlayerController: @unchecked Sendable {
             clock = playbackStartPTS + elapsed
         }
         return min(clock, duration)
+    }
+
+    private func checkEOF(masterClock: Double) -> Bool {
+        guard duration > 0 && masterClock >= duration - 0.05 else { return false }
+        queueLock.lock()
+        let empty = frameRing.isEmpty
+        queueLock.unlock()
+        guard empty else { return false }
+        currentTime = duration
+        DispatchQueue.main.async { [weak self] in
+            self?.pause()
+            self?.onTimeUpdate?(self?.duration ?? 0, self?.duration ?? 0)
+        }
+        return true
     }
 
     private func selectFrame(masterClock: Double) -> VideoFrame? {
@@ -525,10 +575,45 @@ final class PlayerController: @unchecked Sendable {
         playbackStartPTS = pts
     }
 
-    // MARK: - Read Loop
+    // MARK: - 비디오 패킷 큐 관리
 
-    private func readLoop() {
-        while isReading {
+    private func enqueueVideoPacket(_ packet: UnsafeMutablePointer<AVPacket>) {
+        let clone = av_packet_clone(packet)!
+        packetQueueLock.lock()
+        videoPacketQueue.append(clone)
+        packetQueueLock.unlock()
+        packetQueueSemaphore.signal()
+    }
+
+    private func dequeueVideoPacket() -> UnsafeMutablePointer<AVPacket>? {
+        packetQueueLock.lock()
+        let packet = videoPacketQueue.isEmpty ? nil : videoPacketQueue.removeFirst()
+        packetQueueLock.unlock()
+        return packet
+    }
+
+    private func flushPacketQueue() {
+        packetQueueLock.lock()
+        for pkt in videoPacketQueue {
+            var p: UnsafeMutablePointer<AVPacket>? = pkt
+            av_packet_free(&p)
+        }
+        videoPacketQueue.removeAll()
+        packetQueueLock.unlock()
+    }
+
+    private var videoPacketQueueSize: Int {
+        packetQueueLock.lock()
+        let size = videoPacketQueue.count
+        packetQueueLock.unlock()
+        return size
+    }
+
+    // MARK: - Demux Loop
+
+    private func demuxLoop() {
+        while isDemuxing {
+            // seek 요청 처리
             seekLock.lock()
             let pendingSeek = seekRequest
             seekRequest = nil
@@ -538,13 +623,10 @@ final class PlayerController: @unchecked Sendable {
                 performSeek(to: target)
             }
 
-            queueLock.lock()
-            let queueSize = frameRing.count
-            queueLock.unlock()
-
-            if queueSize > 120 {
+            // 패킷 큐 배압 제어
+            if videoPacketQueueSize > maxPacketQueueSize {
                 dropDebugger.recordBackpressure()
-                Thread.sleep(forTimeInterval: 0.005)
+                Thread.sleep(forTimeInterval: 0.002)
                 continue
             }
 
@@ -553,27 +635,76 @@ final class PlayerController: @unchecked Sendable {
                 continue
             }
 
+            if packet.pointee.stream_index == demuxer.selectedVideoIndex {
+                // 비디오 패킷 → 패킷 큐로 전달
+                enqueueVideoPacket(packet)
+                var pkt: UnsafeMutablePointer<AVPacket>? = packet
+                av_packet_free(&pkt)
+            } else if packet.pointee.stream_index == demuxer.selectedAudioIndex {
+                // 오디오 패킷 → 즉시 디코딩 (경량)
+                let buffers = audioDecoder.decode(packet: packet)
+                for buf in buffers {
+                    audioOutput.enqueue(buffer: buf)
+                }
+                var pkt: UnsafeMutablePointer<AVPacket>? = packet
+                av_packet_free(&pkt)
+            } else {
+                var pkt: UnsafeMutablePointer<AVPacket>? = packet
+                av_packet_free(&pkt)
+            }
+        }
+    }
+
+    // MARK: - Video Decode Loop
+
+    private func videoDecodeLoop() {
+        var prebufferSignaled = false
+
+        while isDecoding {
+            // 세마포어 대기 (패킷이 들어올 때 깨어남)
+            _ = packetQueueSemaphore.wait(timeout: .now() + 0.1)
+            guard isDecoding else { break }
+
+            // seek 중이면 디코드 스킵
+            seekLock.lock()
+            let seeking = seekRequest != nil
+            seekLock.unlock()
+            if seeking { continue }
+
+            guard let packet = dequeueVideoPacket() else { continue }
             defer {
                 var pkt: UnsafeMutablePointer<AVPacket>? = packet
                 av_packet_free(&pkt)
             }
 
-            if packet.pointee.stream_index == demuxer.selectedVideoIndex {
-                dropDebugger.decodeBegin()
-                let frames = videoDecoder.decode(packet: packet)
+            // 프레임 큐가 꽉 차면 대기
+            while isDecoding {
                 queueLock.lock()
-                let qd = frameRing.count
+                let full = frameRing.isFull
                 queueLock.unlock()
-                dropDebugger.decodeEnd(playbackTime: currentTime, masterClock: currentTime, queueDepth: qd)
-                if !frames.isEmpty {
-                    queueLock.lock()
-                    frameRing.append(contentsOf: frames)
-                    queueLock.unlock()
+                if !full { break }
+                Thread.sleep(forTimeInterval: 0.001)
+            }
+
+            dropDebugger.decodeBegin()
+            let frames = videoDecoder.decode(packet: packet)
+            queueLock.lock()
+            let qd = frameRing.count
+            queueLock.unlock()
+            dropDebugger.decodeEnd(playbackTime: currentTime, masterClock: currentTime, queueDepth: qd)
+
+            if !frames.isEmpty {
+                queueLock.lock()
+                for frame in frames {
+                    frameRing.append(frame)
                 }
-            } else if packet.pointee.stream_index == demuxer.selectedAudioIndex {
-                let buffers = audioDecoder.decode(packet: packet)
-                for buf in buffers {
-                    audioOutput.enqueue(buffer: buf)
+                let currentDepth = frameRing.count
+                queueLock.unlock()
+
+                // 프리버퍼링 목표 달성 시 시그널
+                if !prebufferSignaled && currentDepth >= prebufferTarget {
+                    prebufferSignaled = true
+                    prebufferReady.signal()
                 }
             }
         }
@@ -595,20 +726,7 @@ final class PlayerController: @unchecked Sendable {
             let masterClock = computeMasterClock()
             currentTime = masterClock
 
-            // EOF 감지
-            if duration > 0 && masterClock >= duration - 0.05 {
-                queueLock.lock()
-                let empty = frameRing.isEmpty
-                queueLock.unlock()
-                if empty {
-                    currentTime = duration
-                    DispatchQueue.main.async { [weak self] in
-                        self?.pause()
-                        self?.onTimeUpdate?(self?.duration ?? 0, self?.duration ?? 0)
-                    }
-                    break
-                }
-            }
+            if checkEOF(masterClock: masterClock) { break }
 
             let frameToShow = selectFrame(masterClock: masterClock)
             measureFPS()
@@ -643,7 +761,6 @@ final class PlayerController: @unchecked Sendable {
                 }
             }
 
-            // 정밀 슬립
             queueLock.lock()
             let sleepTime: Double
             if let next = frameRing.first {
@@ -657,8 +774,11 @@ final class PlayerController: @unchecked Sendable {
         }
     }
 
-    /// read thread 내에서만 호출
+    /// demux 스레드에서만 호출
     private func performSeek(to target: Double) {
+        // 패킷 큐 플러시
+        flushPacketQueue()
+
         demuxer.seek(to: target)
         videoDecoder.flush()
         audioDecoder.flush()

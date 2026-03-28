@@ -36,6 +36,7 @@ final class VideoDecoder {
 
         if tryHardwareAcceleration(ctx: ctx, codec: codec) {
             isHardwareAccelerated = true
+            ctx.pointee.extra_hw_frames = 8  // I-프레임 버스트 시 surface 경합 감소
             log("[VideoDecoder] HW 가속 활성화 (VideoToolbox) - \(codecName)")
         } else {
             log("[VideoDecoder] SW 디코딩으로 폴백 - \(codecName)")

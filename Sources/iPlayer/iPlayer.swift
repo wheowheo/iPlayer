@@ -75,8 +75,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         window.makeFirstResponder(window.contentView)
 
         let args = CommandLine.arguments
-        if args.count > 1 {
-            playerController.openFile(path: args[1])
+        let isBench = args.contains("--bench")
+        let benchDuration: Double = 15.0
+        let files = args.dropFirst().filter { !$0.hasPrefix("--") }
+
+        if isBench && !files.isEmpty {
+            playerController.dropDebugger.isEnabled = true
+            playerController.openFile(path: files.first!)
+
+            let pc = playerController!
+            let file = files.first!
+            let actualDuration = min(benchDuration, pc.duration - 1.0)
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(actualDuration, 3.0)) {
+                let name = URL(fileURLWithPath: file).lastPathComponent
+                pc.dropDebugger.printReport(
+                    file: name,
+                    renderMode: pc.renderMode.rawValue,
+                    renderedFrames: pc.renderedFrames,
+                    droppedFrames: pc.droppedFrames
+                )
+                NSApp.terminate(nil)
+            }
+        } else if !files.isEmpty {
+            playerController.openFile(path: files.first!)
         }
     }
 

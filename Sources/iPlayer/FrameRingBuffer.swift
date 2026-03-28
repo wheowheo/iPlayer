@@ -28,11 +28,15 @@ struct FrameRingBuffer {
         return frame
     }
 
-    mutating func append(_ frame: VideoFrame) {
-        guard count < capacity else { return } // 꽉 차면 무시
+    var isFull: Bool { count >= capacity }
+
+    @discardableResult
+    mutating func append(_ frame: VideoFrame) -> Bool {
+        guard count < capacity else { return false }
         storage[tail] = frame
         tail = (tail + 1) % capacity
         count += 1
+        return true
     }
 
     mutating func append(contentsOf frames: [VideoFrame]) {
