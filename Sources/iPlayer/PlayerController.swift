@@ -183,6 +183,14 @@ final class PlayerController: @unchecked Sendable {
         guard state != .playing else { return }
         guard demuxer.formatCtx != nil else { return }
 
+        // EOF에서 일시정지된 상태 → 처음부터 다시 재생
+        if state == .paused && demuxEOF && duration > 0 && currentTime >= duration - 0.5 {
+            let path = filePath
+            stop()
+            openFile(path: path)
+            return
+        }
+
         if state == .idle || state == .stopped {
             if hasAudio { _ = audioOutput.start() }
             startDemuxThread()

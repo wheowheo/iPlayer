@@ -25,6 +25,7 @@ final class PlayerView: NSView {
 
     // 정보 오버레이
     private let infoOverlay = NSTextField(labelWithString: "")
+    private let audioMeterView = AudioMeterView()
     private var showInfo = false
     private var showDebugger = false
     private var mediaInfo: PlayerController.MediaInfo?
@@ -109,6 +110,9 @@ final class PlayerView: NSView {
         infoOverlay.maximumNumberOfLines = 20
         infoOverlay.isHidden = true
         addSubview(infoOverlay)
+
+        audioMeterView.isHidden = true
+        addSubview(audioMeterView)
 
         controlBar.wantsLayer = true
         controlBar.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.7).cgColor
@@ -202,6 +206,7 @@ final class PlayerView: NSView {
             }
             if self.showInfo || self.showDebugger {
                 self.updateInfoOverlay()
+                self.updateAudioMeter()
             }
         }
 
@@ -213,7 +218,9 @@ final class PlayerView: NSView {
             self?.updatePlayButton(state: state)
         }
 
+        let existingMediaInfo = controller.onMediaInfo
         controller.onMediaInfo = { [weak self] info in
+            existingMediaInfo?(info)
             self?.mediaInfo = info
             self?.applyVideoRotation(info.rotation)
         }
@@ -296,6 +303,11 @@ final class PlayerView: NSView {
         subtitleLabel.frame = NSRect(x: 40, y: barHeight + 10, width: bounds.width - 80, height: subHeight)
 
         infoOverlay.frame = NSRect(x: 10, y: bounds.height - 180, width: 350, height: 170)
+
+        let meterW: CGFloat = 300
+        let meterH: CGFloat = 200
+        audioMeterView.frame = NSRect(x: bounds.width - meterW - 10, y: bounds.height - meterH - 10,
+                                      width: meterW, height: meterH)
     }
 
     // MARK: - 렌더링
@@ -376,6 +388,17 @@ final class PlayerView: NSView {
         infoOverlay.frame = NSRect(x: 10, y: bounds.height - height - 10, width: 400, height: height)
     }
 
+    private func updateAudioMeter() {
+        guard showInfo else {
+            audioMeterView.isHidden = true
+            return
+        }
+        let data = controller.audioOutput.getDisplayData()
+        audioMeterView.update(levelL: data.levelL, levelR: data.levelR,
+                              peakL: data.peakL, peakR: data.peakR, pcm: data.pcm)
+        audioMeterView.isHidden = false
+    }
+
     // MARK: - 키보드 입력
 
     override func keyDown(with event: NSEvent) {
@@ -403,6 +426,7 @@ final class PlayerView: NSView {
         case 48: // Tab
             showInfo.toggle()
             updateInfoOverlay()
+            updateAudioMeter()
         case 46: // M
             controller.isMuted.toggle()
         case 31: // O
@@ -822,6 +846,7 @@ final class PlayerView: NSView {
     @objc private func contextToggleInfo() {
         showInfo.toggle()
         updateInfoOverlay()
+        updateAudioMeter()
     }
 
     @objc private func contextSetRenderMode(_ sender: NSMenuItem) {

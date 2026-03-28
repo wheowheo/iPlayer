@@ -39,6 +39,21 @@ final class AudioOutput {
         return Double(bufferCount - 1) * Double(bufferSize) / bytesPerSecond
     }
 
+    // 채널별 오디오 레벨 (RMS, 0.0~1.0)
+    private(set) var levelL: Float = 0
+    private(set) var levelR: Float = 0
+    private(set) var peakL: Float = 0
+    private(set) var peakR: Float = 0
+    private var _displayPCM: [Float] = []
+
+    /// 스레드 세이프하게 디스플레이 데이터 취득
+    func getDisplayData() -> (levelL: Float, levelR: Float, peakL: Float, peakR: Float, pcm: [Float]) {
+        lock.lock()
+        let result = (levelL, levelR, peakL, peakR, _displayPCM)
+        lock.unlock()
+        return result
+    }
+
     var playbackRate: Float = 1.0 {
         didSet {
             if let queue = audioQueue {
@@ -147,6 +162,8 @@ final class AudioOutput {
         totalBytesConsumed = 0
         totalBytesWritten = 0
         currentPTS = 0
+        levelL = 0; levelR = 0; peakL = 0; peakR = 0
+        _displayPCM = []
         lock.unlock()
     }
 
@@ -169,6 +186,8 @@ final class AudioOutput {
         totalBytesConsumed = 0
         totalBytesWritten = 0
         currentPTS = 0
+        levelL = 0; levelR = 0; peakL = 0; peakR = 0
+        _displayPCM = []
         lock.unlock()
     }
 
@@ -192,11 +211,48 @@ final class AudioOutput {
 
             totalBytesConsumed += toRead
             updateCurrentPTS()
+            computeDisplayData(from: buffer.pointee.mAudioData, byteCount: toRead)
         } else {
             memset(buffer.pointee.mAudioData, 0, bufferSize)
             buffer.pointee.mAudioDataByteSize = UInt32(bufferSize)
+            levelL *= 0.85; levelR *= 0.85
+            peakL *= 0.95; peakR *= 0.95
         }
         lock.unlock()
+    }
+
+    private func computeDisplayData(from audioData: UnsafeMutableRawPointer, byteCount: Int) {
+        let floatPtr = audioData.assumingMemoryBound(to: Float.self)
+        let sampleCount = byteCount / MemoryLayout<Float>.size
+        let frameCount = sampleCount / 2
+        guard frameCount > 0 else { return }
+
+        var sumL: Float = 0, sumR: Float = 0
+
+        for i in 0..<frameCount {
+            let l = floatPtr[i * 2]
+            let r = floatPtr[i * 2 + 1]
+            sumL += l * l
+            sumR += r * r
+        }
+
+        levelL = sqrt(sumL / Float(frameCount))
+        levelR = sqrt(sumR / Float(frameCount))
+
+        // 피크 홀드 + 감쇠
+        peakL = max(peakL * 0.95, levelL)
+        peakR = max(peakR * 0.95, levelR)
+
+        // PCM 스냅샷 (디스플레이용 다운샘플)
+        let targetFrames = min(512, frameCount)
+        let step = max(1, frameCount / targetFrames)
+        var pcm = [Float](repeating: 0, count: targetFrames * 2)
+        for i in 0..<targetFrames {
+            let src = i * step
+            pcm[i * 2] = floatPtr[src * 2]
+            pcm[i * 2 + 1] = floatPtr[src * 2 + 1]
+        }
+        _displayPCM = pcm
     }
 
     private func updateCurrentPTS() {
