@@ -43,14 +43,28 @@ struct PoseResult {
     let connections: [(Int, Int)]
 }
 
+enum FaceExpression: String {
+    case neutral = "무표정"
+    case smile = "웃음 😊"
+    case surprise = "놀람 😮"
+    case frown = "찡그림 😠"
+    case mouthOpen = "입 벌림 😲"
+    case winkLeft = "왼쪽 윙크 😉"
+    case winkRight = "오른쪽 윙크 😉"
+}
+
 struct FaceResult {
     let boundingBox: CGRect
-    let landmarks: [CGPoint]    // 정규화 좌표 (얼굴 bbox 기준)
+    let landmarks: [CGPoint]
     let faceContour: [CGPoint]
     let leftEye: [CGPoint]
     let rightEye: [CGPoint]
     let nose: [CGPoint]
     let outerLips: [CGPoint]
+    let leftEyebrow: [CGPoint]
+    let rightEyebrow: [CGPoint]
+    let innerLips: [CGPoint]
+    let expression: FaceExpression
 }
 
 struct HandResult {
@@ -314,15 +328,127 @@ final class ObjectDetector: @unchecked Sendable {
             guard let r = region else { return [] }
             return (0..<r.pointCount).map { r.normalizedPoints[$0] }
         }
+        let leftEye = pts(lm.leftEye)
+        let rightEye = pts(lm.rightEye)
+        let outerLips = pts(lm.outerLips)
+        let innerLips = pts(lm.innerLips)
+        let leftEyebrow = pts(lm.leftEyebrow)
+        let rightEyebrow = pts(lm.rightEyebrow)
+
+        let expression = analyzeExpression(
+            leftEye: leftEye, rightEye: rightEye,
+            outerLips: outerLips, innerLips: innerLips,
+            leftEyebrow: leftEyebrow, rightEyebrow: rightEyebrow
+        )
+
         return FaceResult(
             boundingBox: obs.boundingBox,
             landmarks: pts(lm.allPoints),
             faceContour: pts(lm.faceContour),
-            leftEye: pts(lm.leftEye),
-            rightEye: pts(lm.rightEye),
-            nose: pts(lm.nose),
-            outerLips: pts(lm.outerLips)
+            leftEye: leftEye, rightEye: rightEye,
+            nose: pts(lm.nose), outerLips: outerLips,
+            leftEyebrow: leftEyebrow, rightEyebrow: rightEyebrow,
+            innerLips: innerLips, expression: expression
         )
+    }
+
+    // MARK: - 표정 분석 (랜드마크 기하학)
+
+    private func analyzeExpression(
+        leftEye: [CGPoint], rightEye: [CGPoint],
+        outerLips: [CGPoint], innerLips: [CGPoint],
+        leftEyebrow: [CGPoint], rightEyebrow: [CGPoint]
+    ) -> FaceExpression {
+        // 눈 개폐 비율 (높이/너비)
+        let leftEyeAR = eyeAspectRatio(leftEye)
+        let rightEyeAR = eyeAspectRatio(rightEye)
+
+        // 윙크 감지
+        if leftEyeAR < 0.15 && rightEyeAR > 0.25 { return .winkLeft }
+        if rightEyeAR < 0.15 && leftEyeAR > 0.25 { return .winkRight }
+
+        // 입 개폐 비율
+        let mouthAR = mouthAspectRatio(outerLips)
+        let innerMouthAR = mouthAspectRatio(innerLips)
+
+        // 입 너비 비율 (웃음 감지용)
+        let mouthWidth = mouthWidthRatio(outerLips)
+
+        // 눈썹 높이 (놀람 감지용)
+        let browHeight = eyebrowHeight(leftEyebrow: leftEyebrow, rightEyebrow: rightEyebrow,
+                                        leftEye: leftEye, rightEye: rightEye)
+
+        // 입 크게 벌림
+        if innerMouthAR > 0.5 && mouthAR > 0.4 {
+            // 눈도 크면 놀람, 아니면 입 벌림
+            if browHeight > 0.35 && leftEyeAR > 0.3 && rightEyeAR > 0.3 {
+                return .surprise
+            }
+            return .mouthOpen
+        }
+
+        // 놀람: 눈썹 올라감 + 눈 크게 뜸
+        if browHeight > 0.35 && leftEyeAR > 0.32 && rightEyeAR > 0.32 {
+            return .surprise
+        }
+
+        // 웃음: 입꼬리 올라감 + 입 넓어짐
+        if mouthWidth > 0.55 && mouthAR < 0.35 {
+            return .smile
+        }
+
+        // 찡그림: 눈썹 내려감 + 입꼬리 내려감
+        if browHeight < 0.18 && mouthWidth < 0.42 {
+            return .frown
+        }
+
+        return .neutral
+    }
+
+    /// 눈 종횡비 (Eye Aspect Ratio) — 감긴 눈 < 0.2, 뜬 눈 > 0.25
+    private func eyeAspectRatio(_ eye: [CGPoint]) -> CGFloat {
+        guard eye.count >= 6 else { return 0.25 }
+        // 눈 포인트: 0=안쪽, 1-2=위, 3=바깥, 4-5=아래 (대략적)
+        let h1 = abs(eye[1].y - eye[5].y)
+        let h2 = abs(eye[2].y - eye[4].y)
+        let w = abs(eye[3].x - eye[0].x)
+        guard w > 0 else { return 0.25 }
+        return (h1 + h2) / (2.0 * w)
+    }
+
+    /// 입 종횡비 — 다문 입 < 0.2, 벌린 입 > 0.4
+    private func mouthAspectRatio(_ lips: [CGPoint]) -> CGFloat {
+        guard lips.count >= 8 else { return 0.2 }
+        let top = lips[lips.count / 4]        // 상순 중앙 부근
+        let bottom = lips[lips.count * 3 / 4]  // 하순 중앙 부근
+        let left = lips[0]
+        let right = lips[lips.count / 2]
+        let h = abs(top.y - bottom.y)
+        let w = abs(right.x - left.x)
+        guard w > 0 else { return 0.2 }
+        return h / w
+    }
+
+    /// 입 너비 비율 (얼굴 대비) — 웃을 때 > 0.55
+    private func mouthWidthRatio(_ lips: [CGPoint]) -> CGFloat {
+        guard lips.count >= 4 else { return 0.45 }
+        let left = lips[0]
+        let right = lips[lips.count / 2]
+        return abs(right.x - left.x)
+    }
+
+    /// 눈썹-눈 거리 비율 — 놀람 > 0.35, 찡그림 < 0.18
+    private func eyebrowHeight(leftEyebrow: [CGPoint], rightEyebrow: [CGPoint],
+                                leftEye: [CGPoint], rightEye: [CGPoint]) -> CGFloat {
+        guard !leftEyebrow.isEmpty, !rightEyebrow.isEmpty,
+              !leftEye.isEmpty, !rightEye.isEmpty else { return 0.25 }
+        let lbCenter = leftEyebrow[leftEyebrow.count / 2].y
+        let rbCenter = rightEyebrow[rightEyebrow.count / 2].y
+        let leCenter = leftEye.reduce(0.0) { $0 + $1.y } / CGFloat(leftEye.count)
+        let reCenter = rightEye.reduce(0.0) { $0 + $1.y } / CGFloat(rightEye.count)
+        let leftDist = lbCenter - leCenter
+        let rightDist = rbCenter - reCenter
+        return (leftDist + rightDist) / 2.0
     }
 
     // MARK: - 손 추적

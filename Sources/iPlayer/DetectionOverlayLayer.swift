@@ -90,8 +90,16 @@ final class DetectionOverlayLayer: CALayer {
             drawFaceRegion(face.faceContour, faceRect: faceRect, color: .white, in: ctx)
             drawFaceRegion(face.leftEye, faceRect: faceRect, color: .systemCyan, in: ctx)
             drawFaceRegion(face.rightEye, faceRect: faceRect, color: .systemCyan, in: ctx)
+            drawFaceRegion(face.leftEyebrow, faceRect: faceRect, color: .systemMint, in: ctx)
+            drawFaceRegion(face.rightEyebrow, faceRect: faceRect, color: .systemMint, in: ctx)
             drawFaceRegion(face.nose, faceRect: faceRect, color: .systemYellow, in: ctx)
             drawFaceRegion(face.outerLips, faceRect: faceRect, color: .systemRed, in: ctx)
+            drawFaceRegion(face.innerLips, faceRect: faceRect, color: .systemOrange, in: ctx)
+
+            // 표정 레이블
+            drawLabel(face.expression.rawValue,
+                      at: CGPoint(x: faceRect.minX, y: faceRect.maxY),
+                      color: .systemPink, in: ctx)
         }
     }
 
