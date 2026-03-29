@@ -5,7 +5,7 @@ final class ClothingManagerWindow: NSWindowController, NSTableViewDataSource, NS
     private let db = ClothingDatabase.shared
     private var items: [ClothingItem] = []
     private let statsLabel = NSTextField(labelWithString: "")
-    private let previewRenderer = ClothingRenderer3D()
+    private var previewCache: [Int64: NSImage] = [:]  // id → 렌더 캐시
     private var typeFilter: ClothingType? = nil
 
     convenience init() {
@@ -111,6 +111,7 @@ final class ClothingManagerWindow: NSWindowController, NSTableViewDataSource, NS
         } else {
             items = db.fetchAll()
         }
+        previewCache.removeAll()  // 캐시 클리어
         tableView.reloadData()
         updateStats()
     }
@@ -165,17 +166,28 @@ final class ClothingManagerWindow: NSWindowController, NSTableViewDataSource, NS
         case "preview":
             let imgView = NSImageView()
             imgView.imageScaling = .scaleProportionallyUpOrDown
-            if !item.modelFile.isEmpty {
-                if let preview = previewRenderer.renderPreview(item: item, size: CGSize(width: 48, height: 56)) {
-                    imgView.image = preview
+            // 캐시에서 미리보기 사용 (메인 스레드 블로킹 방지)
+            if let cached = previewCache[item.id] {
+                imgView.image = cached
+            } else if !item.modelFile.isEmpty {
+                // 비동기로 렌더링 후 캐시
+                let itemCopy = item
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    let renderer = ClothingRenderer3D()
+                    let preview = renderer.renderPreview(item: itemCopy, size: CGSize(width: 48, height: 56))
+                    DispatchQueue.main.async {
+                        self?.previewCache[itemCopy.id] = preview
+                        self?.tableView.reloadData(forRowIndexes: IndexSet(integer: row),
+                                                    columnIndexes: IndexSet(integer: 1))
+                    }
                 }
             } else {
-                let view = NSView()
-                view.wantsLayer = true
                 let c = item.color
-                view.layer?.backgroundColor = NSColor(red: c.r, green: c.g, blue: c.b, alpha: 1).cgColor
-                view.layer?.cornerRadius = 4
-                return view
+                let colorView = NSView()
+                colorView.wantsLayer = true
+                colorView.layer?.backgroundColor = NSColor(red: c.r, green: c.g, blue: c.b, alpha: 1).cgColor
+                colorView.layer?.cornerRadius = 4
+                return colorView
             }
             return imgView
 

@@ -183,32 +183,60 @@ final class DetectionOverlayLayer: CALayer {
             if let rendered = clothingRenderer.render(
                 shoulderLeft: pt(2), shoulderRight: pt(3), hip: pt(8)
             ) {
-                // 어깨~엉덩이 영역에 3D 렌더링 오버레이
-                let ls = pt(2), rs = pt(3), lh = pt(9), rh = pt(10)
-                if let ls = ls, let rs = rs {
-                    let bodyTop = max(ls.y, rs.y)
-                    let bodyBot = min(lh?.y ?? ls.y - 200, rh?.y ?? rs.y - 200)
-                    let bodyLeft = min(ls.x, rs.x)
-                    let bodyRight = max(ls.x, rs.x)
-                    let bodyW = bodyRight - bodyLeft
-                    let bodyH = bodyTop - bodyBot
+                // 의류 타입별 위치 결정
+                // Vision y-up: 머리(y 큼) → 발(y 작음)
+                let drawRect: CGRect
 
-                    // 여유 확장
-                    let expandW = bodyW * 0.5
-                    let expandH = bodyH * 0.2
-                    let drawRect = CGRect(
-                        x: bodyLeft - expandW / 2,
-                        y: bodyBot - expandH,
-                        width: bodyW + expandW,
-                        height: bodyH + expandH * 2
-                    )
-                    ctx.draw(rendered, in: drawRect)
+                switch clothing.type {
+                case .hat:
+                    // 머리 위: 코(0) 위쪽
+                    if let nose = pt(0), let neck = pt(1) {
+                        let headH = abs(nose.y - neck.y) * 1.2
+                        let headW = headH * 1.8
+                        drawRect = CGRect(x: nose.x - headW / 2, y: nose.y, width: headW, height: headH)
+                    } else { return }
+
+                case .bottom:
+                    // 엉덩이 → 발목
+                    if let lh = pt(9), let rh = pt(10) {
+                        let la = pt(13) ?? pt(11) ?? lh
+                        let ra = pt(14) ?? pt(12) ?? rh
+                        let top = max(lh.y, rh.y)
+                        let bot = min(la.y, ra.y)
+                        let left = min(lh.x, rh.x, la.x, ra.x)
+                        let right = max(lh.x, rh.x, la.x, ra.x)
+                        let w = right - left
+                        drawRect = CGRect(x: left - w * 0.2, y: bot, width: w * 1.4, height: top - bot)
+                    } else { return }
+
+                case .top, .fullBody, .accessory:
+                    // 어깨 → 엉덩이 (상의/전신)
+                    let ls = pt(2), rs = pt(3), lh = pt(9), rh = pt(10)
+                    if let ls = ls, let rs = rs {
+                        let top = max(ls.y, rs.y)
+                        let bot: CGFloat
+                        if clothing.type == .fullBody {
+                            let la = pt(13) ?? pt(11)
+                            let ra = pt(14) ?? pt(12)
+                            bot = min(la?.y ?? (lh?.y ?? top - 200), ra?.y ?? (rh?.y ?? top - 200))
+                        } else {
+                            bot = min(lh?.y ?? top - 150, rh?.y ?? top - 150)
+                        }
+                        let left = min(ls.x, rs.x)
+                        let right = max(ls.x, rs.x)
+                        let bodyW = right - left
+                        let bodyH = top - bot
+                        drawRect = CGRect(x: left - bodyW * 0.25, y: bot - bodyH * 0.05,
+                                          width: bodyW * 1.5, height: bodyH * 1.15)
+                    } else { return }
                 }
+
+                ctx.draw(rendered, in: drawRect)
             }
         }
 
         // 옷 이름 표시 (하단 중앙)
-        let nameStr = "\(clothing.name)"
+        let nameStr = "\(clothing.name) (\(clothing.type.rawValue))"
         drawLabel(nameStr, at: CGPoint(x: (bounds.width - 100) / 2, y: 20), color: .systemBlue, in: ctx)
 
         // 스와이프 표시
