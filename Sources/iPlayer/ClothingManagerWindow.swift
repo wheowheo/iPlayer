@@ -5,6 +5,7 @@ final class ClothingManagerWindow: NSWindowController, NSTableViewDataSource, NS
     private let db = ClothingDatabase.shared
     private var items: [ClothingItem] = []
     private let statsLabel = NSTextField(labelWithString: "")
+    private let previewRenderer = ClothingRenderer3D()
     private var typeFilter: ClothingType? = nil
 
     convenience init() {
@@ -64,18 +65,18 @@ final class ClothingManagerWindow: NSWindowController, NSTableViewDataSource, NS
 
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.rowHeight = 36
+        tableView.rowHeight = 60
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.allowsMultipleSelection = false
 
         let cols: [(String, String, CGFloat)] = [
             ("active", "착용", 36),
+            ("preview", "미리보기", 50),
+            ("name", "이름", 120),
+            ("type", "종류", 55),
+            ("model", "3D 모델", 100),
             ("color", "색상", 36),
-            ("name", "이름", 150),
-            ("type", "종류", 60),
-            ("pattern", "패턴", 60),
-            ("opacity", "투명도", 55),
-            ("notes", "메모", 140),
+            ("notes", "메모", 130),
         ]
         for (id, title, width) in cols {
             let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
@@ -161,6 +162,23 @@ final class ClothingManagerWindow: NSWindowController, NSTableViewDataSource, NS
             check.tag = row
             return check
 
+        case "preview":
+            let imgView = NSImageView()
+            imgView.imageScaling = .scaleProportionallyUpOrDown
+            if !item.modelFile.isEmpty {
+                if let preview = previewRenderer.renderPreview(item: item, size: CGSize(width: 48, height: 56)) {
+                    imgView.image = preview
+                }
+            } else {
+                let view = NSView()
+                view.wantsLayer = true
+                let c = item.color
+                view.layer?.backgroundColor = NSColor(red: c.r, green: c.g, blue: c.b, alpha: 1).cgColor
+                view.layer?.cornerRadius = 4
+                return view
+            }
+            return imgView
+
         case "color":
             let view = NSView()
             view.wantsLayer = true
@@ -170,22 +188,17 @@ final class ClothingManagerWindow: NSWindowController, NSTableViewDataSource, NS
             return view
 
         case "name":
-            let field = editableField(item.name, row: row, col: id)
-            return field
+            return editableField(item.name, row: row, col: id)
 
         case "type":
             let label = NSTextField(labelWithString: item.type.rawValue)
             label.font = .systemFont(ofSize: 11)
             return label
 
-        case "pattern":
-            let label = NSTextField(labelWithString: item.pattern)
-            label.font = .systemFont(ofSize: 11)
-            return label
-
-        case "opacity":
-            let label = NSTextField(labelWithString: String(format: "%.0f%%", item.opacity * 100))
-            label.font = .systemFont(ofSize: 11)
+        case "model":
+            let label = NSTextField(labelWithString: item.modelFile.isEmpty ? "(없음)" : item.modelFile)
+            label.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+            label.textColor = item.modelFile.isEmpty ? .tertiaryLabelColor : .labelColor
             return label
 
         case "notes":
