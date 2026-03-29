@@ -56,6 +56,7 @@ let package = Package(
                 .linkedFramework("Vision"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("SceneKit"),
+                .linkedLibrary("sqlite3"),
                 .linkedFramework("ModelIO"),
             ]
         ),

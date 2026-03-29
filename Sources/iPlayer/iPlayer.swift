@@ -186,6 +186,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         trackMenuItem.submenu = trackMenu
         mainMenu.addItem(trackMenuItem)
 
+        // 도구 메뉴
+        let toolMenuItem = NSMenuItem()
+        let toolMenu = NSMenu(title: "도구")
+        toolMenu.addItem(withTitle: "옷장 관리...", action: #selector(showClothingManager(_:)), keyEquivalent: "")
+        toolMenuItem.submenu = toolMenu
+        mainMenu.addItem(toolMenuItem)
+
         // 윈도우 메뉴
         let windowMenuItem = NSMenuItem()
         let windowMenu = NSMenu(title: "윈도우")
@@ -321,6 +328,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         if panel.runModal() == .OK, let url = panel.url {
             playerController.loadSubtitle(path: url.path)
         }
+    }
+
+    private var clothingWindow: ClothingManagerWindow?
+
+    @MainActor @objc func showClothingManager(_ sender: Any) {
+        if clothingWindow == nil {
+            clothingWindow = ClothingManagerWindow()
+        }
+        clothingWindow?.showWindow(nil)
+        clothingWindow?.window?.makeKeyAndOrderFront(nil)
     }
 
     @objc func togglePlayAction(_ sender: Any) {

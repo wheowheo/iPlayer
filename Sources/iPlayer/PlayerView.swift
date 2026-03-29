@@ -1031,6 +1031,10 @@ final class PlayerView: NSView {
 
         menu.addItem(NSMenuItem.separator())
 
+        // 옷장 관리
+        let clothingItem = NSMenuItem(title: "옷장 관리...", action: #selector(AppDelegate.showClothingManager(_:)), keyEquivalent: "")
+        menu.addItem(clothingItem)
+
         // 라이브러리 정보
         let libItem = NSMenuItem(title: "라이브러리 정보", action: #selector(AppDelegate.showLibraryInfo(_:)), keyEquivalent: "")
         menu.addItem(libItem)
