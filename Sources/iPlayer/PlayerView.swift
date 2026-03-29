@@ -45,6 +45,7 @@ final class PlayerView: NSView {
     // 컨트롤 숨기기 타이머
     private var hideTimer: Timer?
     private var controlsVisible = true
+    private var meterUpdateCounter = 0  // 오디오 미터 쓰로틀링
 
     // 창 드래그용
     private var isDraggingWindow = false
@@ -62,6 +63,10 @@ final class PlayerView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     override var acceptsFirstResponder: Bool { true }
@@ -256,8 +261,12 @@ final class PlayerView: NSView {
             }
             if self.showInfo || self.showDebugger {
                 self.updateInfoOverlay()
-                self.updateAudioMeter()
-                self.updateResourceOverlay()
+                self.meterUpdateCounter += 1
+                if self.meterUpdateCounter >= 4 {  // 60Hz → 15Hz
+                    self.meterUpdateCounter = 0
+                    self.updateAudioMeter()
+                    self.updateResourceOverlay()
+                }
             }
         }
 

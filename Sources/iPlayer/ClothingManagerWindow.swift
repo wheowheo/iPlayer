@@ -176,6 +176,9 @@ final class ClothingManagerWindow: NSWindowController, NSTableViewDataSource, NS
                     let renderer = ClothingRenderer3D()
                     let preview = renderer.renderPreview(item: itemCopy, size: CGSize(width: 48, height: 56))
                     DispatchQueue.main.async {
+                        if (self?.previewCache.count ?? 0) > 50 {
+                            self?.previewCache.removeAll()  // LRU 대신 전체 클리어
+                        }
                         self?.previewCache[itemCopy.id] = preview
                         self?.tableView.reloadData(forRowIndexes: IndexSet(integer: row),
                                                     columnIndexes: IndexSet(integer: 1))

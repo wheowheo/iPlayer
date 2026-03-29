@@ -543,7 +543,8 @@ final class PlayerController: @unchecked Sendable {
         let ptr = Unmanaged.passRetained(self).toOpaque()
         displayLinkSelfPtr = ptr
         CVDisplayLinkSetOutputCallback(link, { (_, _, _, _, _, context) -> CVReturn in
-            let controller = Unmanaged<PlayerController>.fromOpaque(context!).takeUnretainedValue()
+            guard let context = context else { return kCVReturnError }
+            let controller = Unmanaged<PlayerController>.fromOpaque(context).takeUnretainedValue()
             controller.displayLinkTick()
             return kCVReturnSuccess
         }, ptr)

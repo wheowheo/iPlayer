@@ -59,7 +59,7 @@ final class FaceRenderer3D {
         // 내장 얼굴 메시 로드 시도
         if let meshURL = findBuiltInMesh(), let meshScene = try? SCNScene(url: meshURL, options: nil),
            let meshNode = meshScene.rootNode.childNodes.first, let meshGeo = meshNode.geometry {
-            let geometry = meshGeo.copy() as! SCNGeometry
+            guard let geometry = meshGeo.copy() as? SCNGeometry else { return }
             let mat = SCNMaterial()
             mat.diffuse.contents = image
             mat.lightingModel = .phong

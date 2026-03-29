@@ -844,8 +844,9 @@ final class ObjectDetector: @unchecked Sendable {
         let now = CACurrentMediaTime()
         handHistory.append((x: wrist.location.x, time: now))
 
-        // 0.8초 이상 된 이력 제거
+        // 0.8초 이상 된 이력 제거 + 상한 50
         handHistory.removeAll { now - $0.time > 0.8 }
+        if handHistory.count > 50 { handHistory.removeFirst(handHistory.count - 50) }
 
         // 최소 5프레임 이력 필요
         guard handHistory.count >= 5 else { return nil }
@@ -853,8 +854,7 @@ final class ObjectDetector: @unchecked Sendable {
         // 쿨다운: 마지막 스와이프 후 1초
         guard now - lastSwipeTime > 1.0 else { return nil }
 
-        let firstX = handHistory.first!.x
-        let lastX = handHistory.last!.x
+        guard let firstX = handHistory.first?.x, let lastX = handHistory.last?.x else { return nil }
         let dx = lastX - firstX
 
         // 수평 이동량 > 0.25 (화면의 25%)
