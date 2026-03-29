@@ -67,6 +67,11 @@ final class CameraController: NSObject, @unchecked Sendable {
         }
         session.addOutput(output)
 
+        // 전면 카메라 좌우 반전 (거울 모드)
+        if let connection = output.connection(with: .video), connection.isVideoMirroringSupported {
+            connection.isVideoMirrored = true
+        }
+
         captureSession = session
         currentDeviceName = cam.localizedName
         session.startRunning()
