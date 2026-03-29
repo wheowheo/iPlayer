@@ -838,19 +838,25 @@ final class ObjectDetector: @unchecked Sendable {
     }
 
     private func estimateHeadPose(leftEye: CGPoint, rightEye: CGPoint, nose: CGPoint) -> HeadPose {
-        // Roll: 눈 기울기
+        // 입력: bbox 내 정규화 좌표 (y-up: 0=턱, 1=이마)
+
+        // Roll: 눈 기울기 (좌우 갸우뚱)
         let roll = atan2(rightEye.y - leftEye.y, rightEye.x - leftEye.x)
 
-        // Yaw: 코 위치가 눈 중심에서 얼마나 벗어났는지
-        // 정면일 때 nose.x ≈ 0.5, 좌회전 시 < 0.5, 우회전 시 > 0.5
+        // Yaw: 코가 눈 중심에서 좌우로 벗어난 정도
         let eyeMidX = (leftEye.x + rightEye.x) / 2
-        let yaw = (nose.x - eyeMidX) * 3.0  // -1.5 ~ +1.5 rad 범위로 확대
+        let yaw = (nose.x - eyeMidX) * 3.0
 
-        // Pitch: 코가 눈보다 얼마나 아래에 있는지
+        // Pitch: 코-눈 수직 거리 비율로 상하 끄덕임 추정
+        // y-up 좌표에서: 코 < 눈 → nose.y < eyeMidY → (nose.y - eyeMidY) < 0 → 정면
+        // 고개 들면: 코가 상대적으로 올라감 → 비율 증가
+        // 고개 숙이면: 코가 상대적으로 내려감 → 비율 감소
         let eyeMidY = (leftEye.y + rightEye.y) / 2
         let eyeDist = abs(rightEye.x - leftEye.x)
         let noseDropRatio = (eyeMidY - nose.y) / max(eyeDist, 0.01)
-        let pitch = (noseDropRatio - 0.6) * 2.0  // 기본값 0.6에서 편차
+        // 정면 기준: noseDropRatio ≈ 0.65 (눈-코 거리 / 눈간 거리)
+        // 양수 편차 = 코가 더 아래 = 고개 듦, 음수 = 코가 위로 = 고개 숙임
+        let pitch = (noseDropRatio - 0.65) * 1.5
 
         return HeadPose(roll: roll, yaw: yaw, pitch: pitch)
     }

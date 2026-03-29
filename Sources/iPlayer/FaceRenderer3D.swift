@@ -155,10 +155,12 @@ final class FaceRenderer3D {
     /// 머리 포즈에 따라 3D 렌더링
     func render(roll: CGFloat, yaw: CGFloat, pitch: CGFloat) -> CGImage? {
         // 얼굴 노드 회전 (라디안)
+        // SceneKit X축: +값 = 위를 봄, -값 = 아래를 봄
+        // pitch: +값 = 고개 듦 → SceneKit에서 +pitch = 위를 봄 → 부호 동일
         faceNode.eulerAngles = SCNVector3(
-            Float(-pitch),   // X축: 상하 끄덕임
-            Float(-yaw),     // Y축: 좌우 돌림
-            Float(-roll)     // Z축: 좌우 기울임
+            Float(pitch),    // X축: 상하 끄덕임 (부호 유지)
+            Float(-yaw),     // Y축: 좌우 돌림 (Vision↔SceneKit 반전)
+            Float(-roll)     // Z축: 좌우 기울임 (Vision↔SceneKit 반전)
         )
 
         // 렌더링
