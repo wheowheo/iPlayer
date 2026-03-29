@@ -41,7 +41,6 @@ final class ClothingDatabase: @unchecked Sendable {
     private init() {
         openDatabase()
         createTable()
-        seedSampleData()
     }
 
     deinit {
@@ -49,56 +48,22 @@ final class ClothingDatabase: @unchecked Sendable {
     }
 
     private func openDatabase() {
+        // AppDatabase와 동일한 DB 파일 사용
         let dbDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("iPlayer", isDirectory: true)
         try? FileManager.default.createDirectory(at: dbDir, withIntermediateDirectories: true)
-        let dbPath = dbDir.appendingPathComponent("clothing.db").path
+        let dbPath = dbDir.appendingPathComponent("iPlayer.db").path
 
         if sqlite3_open(dbPath, &db) != SQLITE_OK {
             log("[ClothingDB] 데이터베이스 열기 실패: \(dbPath)")
             return
         }
-        log("[ClothingDB] 열림: \(dbPath)")
     }
 
     private func createTable() {
-        let sql = """
-        CREATE TABLE IF NOT EXISTS clothing (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            type TEXT NOT NULL DEFAULT '상의',
-            color_hex TEXT NOT NULL DEFAULT '#3366FF',
-            opacity REAL NOT NULL DEFAULT 0.7,
-            pattern TEXT NOT NULL DEFAULT 'solid',
-            model_file TEXT DEFAULT '',
-            notes TEXT DEFAULT '',
-            created_at REAL NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1
-        );
-        """
-        exec(sql)
-        // 마이그레이션: model_file 컬럼 추가 (기존 DB 호환)
-        exec("ALTER TABLE clothing ADD COLUMN model_file TEXT DEFAULT ''")
-    }
-
-    private func seedSampleData() {
-        if fetchAll().count > 0 { return }
-
-        // (이름, 종류, 색상, 패턴, 3D 모델)
-        let samples: [(String, ClothingType, String, String, String)] = [
-            ("파란 캐주얼 셋트", .fullBody, "#3366FF", "solid", "tshirt.obj"),
-            ("검정 정장", .fullBody, "#333333", "solid", "suit.obj"),
-            ("핑크 드레스", .fullBody, "#FF6699", "solid", "dress.obj"),
-            ("캐주얼 셋트 2", .fullBody, "#558844", "solid", "casual2.obj"),
-            ("스포츠웨어", .fullBody, "#FF4444", "solid", "sportswear.obj"),
-            ("페도라 모자", .hat, "#AA7744", "solid", "fedora.obj"),
-        ]
-
-        let now = Date().timeIntervalSince1970
-        for (name, type, color, pattern, model) in samples {
-            insert(name: name, type: type, colorHex: color, pattern: pattern, modelFile: model, createdAt: now)
-        }
-        log("[ClothingDB] 3D 의류 샘플 \(samples.count)벌 생성")
+        // AppDatabase.shared가 clothing 테이블 생성 + 시딩 담당
+        // ClothingDatabase는 clothing 테이블에 대한 CRUD만 수행
+        _ = AppDatabase.shared  // 테이블 보장
     }
 
     // MARK: - CRUD

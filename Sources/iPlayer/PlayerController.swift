@@ -204,6 +204,12 @@ final class PlayerController: @unchecked Sendable {
             self?.onMediaInfo?(info)
         }
 
+        // 재생 이력 기록
+        AppDatabase.shared.recordPlay(
+            path: path, codec: info.videoCodec, audioCodec: info.audioCodec,
+            width: Int(info.width), height: Int(info.height), duration: duration
+        )
+
         play()
     }
 

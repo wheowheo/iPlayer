@@ -23,9 +23,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     private var videoAspectRatio: CGFloat = 16.0 / 9.0
     private var recentFilesMenu: NSMenu!
 
-    // 최근 파일 목록 (UserDefaults)
+    // 최근 파일 목록 (SQLite로 이관, UserDefaults 폴백)
     private let recentFilesKey = "iPlayer.recentFiles"
     private let maxRecentFiles = 10
+    private let appDB = AppDatabase.shared
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenu()
@@ -383,17 +384,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     private func updateRecentFilesMenu() {
         guard let menu = recentFilesMenu else { return }
         menu.removeAllItems()
-        let recent = UserDefaults.standard.stringArray(forKey: recentFilesKey) ?? []
-        if recent.isEmpty {
-            let emptyItem = NSMenuItem(title: "(없음)", action: nil, keyEquivalent: "")
-            emptyItem.isEnabled = false
-            menu.addItem(emptyItem)
+
+        let recentDB = appDB.getRecentFiles(limit: maxRecentFiles)
+        if recentDB.isEmpty {
+            // UserDefaults 폴백 (기존 데이터 이관)
+            let legacy = UserDefaults.standard.stringArray(forKey: recentFilesKey) ?? []
+            if legacy.isEmpty {
+                let emptyItem = NSMenuItem(title: "(없음)", action: nil, keyEquivalent: "")
+                emptyItem.isEnabled = false
+                menu.addItem(emptyItem)
+            } else {
+                for path in legacy {
+                    appDB.recordPlay(path: path)  // SQLite로 이관
+                    let name = URL(fileURLWithPath: path).lastPathComponent
+                    let item = NSMenuItem(title: name, action: #selector(openRecentFile(_:)), keyEquivalent: "")
+                    item.representedObject = path; item.target = self
+                    menu.addItem(item)
+                }
+            }
         } else {
-            for path in recent {
-                let name = URL(fileURLWithPath: path).lastPathComponent
-                let item = NSMenuItem(title: name, action: #selector(openRecentFile(_:)), keyEquivalent: "")
-                item.representedObject = path
-                item.target = self
+            for entry in recentDB {
+                let title = "\(entry.name)  ×\(entry.count)"
+                let item = NSMenuItem(title: title, action: #selector(openRecentFile(_:)), keyEquivalent: "")
+                item.representedObject = entry.path; item.target = self
                 menu.addItem(item)
             }
         }
