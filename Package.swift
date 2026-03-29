@@ -22,6 +22,7 @@ let package = Package(
                 .copy("Resources/YOLOv8n.mlmodelc"),
                 .copy("Resources/MiDaSSmall.mlmodelc"),
                 .copy("Resources/face_mesh.obj"),
+                .copy("Resources/clothes"),
                 .copy("Resources/flame_face.obj"),
             ],
             swiftSettings: [

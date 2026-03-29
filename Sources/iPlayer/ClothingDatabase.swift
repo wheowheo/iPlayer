@@ -18,12 +18,13 @@ struct ClothingItem: Identifiable {
     var colorHex: String      // "#FF0000"
     var opacity: Double       // 0.0~1.0
     var pattern: String       // "solid", "stripe", "check"
+    var modelFile: String     // 3D 모델 파일명 ("tshirt.obj")
     var notes: String
     var createdAt: Date
     var isActive: Bool
 
     var color: (r: CGFloat, g: CGFloat, b: CGFloat) {
-        let hex = colorHex.dropFirst()  // remove #
+        let hex = colorHex.dropFirst()
         let val = UInt64(hex, radix: 16) ?? 0
         return (r: CGFloat((val >> 16) & 0xFF) / 255,
                 g: CGFloat((val >> 8) & 0xFF) / 255,
@@ -69,37 +70,35 @@ final class ClothingDatabase: @unchecked Sendable {
             color_hex TEXT NOT NULL DEFAULT '#3366FF',
             opacity REAL NOT NULL DEFAULT 0.7,
             pattern TEXT NOT NULL DEFAULT 'solid',
+            model_file TEXT DEFAULT '',
             notes TEXT DEFAULT '',
             created_at REAL NOT NULL,
             is_active INTEGER NOT NULL DEFAULT 1
         );
         """
         exec(sql)
+        // 마이그레이션: model_file 컬럼 추가 (기존 DB 호환)
+        exec("ALTER TABLE clothing ADD COLUMN model_file TEXT DEFAULT ''")
     }
 
     private func seedSampleData() {
-        // 이미 데이터가 있으면 스킵
         if fetchAll().count > 0 { return }
 
-        let samples: [(String, ClothingType, String, String)] = [
-            ("파란 티셔츠", .top, "#3366FF", "solid"),
-            ("빨간 후드", .top, "#DD3333", "solid"),
-            ("검정 정장 상의", .top, "#222222", "solid"),
-            ("흰색 셔츠", .top, "#F5F5F5", "solid"),
-            ("회색 줄무늬 셔츠", .top, "#888888", "stripe"),
-            ("청바지", .bottom, "#4466AA", "solid"),
-            ("검정 슬랙스", .bottom, "#1A1A1A", "solid"),
-            ("카키 팬츠", .bottom, "#AA8844", "solid"),
-            ("검정 원피스", .fullBody, "#111111", "solid"),
-            ("야구 모자", .hat, "#CC3333", "solid"),
-            ("선글라스", .accessory, "#333333", "solid"),
+        // (이름, 종류, 색상, 패턴, 3D 모델)
+        let samples: [(String, ClothingType, String, String, String)] = [
+            ("파란 캐주얼 셋트", .fullBody, "#3366FF", "solid", "tshirt.obj"),
+            ("검정 정장", .fullBody, "#333333", "solid", "suit.obj"),
+            ("핑크 드레스", .fullBody, "#FF6699", "solid", "dress.obj"),
+            ("캐주얼 셋트 2", .fullBody, "#558844", "solid", "casual2.obj"),
+            ("스포츠웨어", .fullBody, "#FF4444", "solid", "sportswear.obj"),
+            ("페도라 모자", .hat, "#AA7744", "solid", "fedora.obj"),
         ]
 
         let now = Date().timeIntervalSince1970
-        for (name, type, color, pattern) in samples {
-            insert(name: name, type: type, colorHex: color, pattern: pattern, createdAt: now)
+        for (name, type, color, pattern, model) in samples {
+            insert(name: name, type: type, colorHex: color, pattern: pattern, modelFile: model, createdAt: now)
         }
-        log("[ClothingDB] 샘플 \(samples.count)개 생성")
+        log("[ClothingDB] 3D 의류 샘플 \(samples.count)벌 생성")
     }
 
     // MARK: - CRUD
@@ -107,8 +106,8 @@ final class ClothingDatabase: @unchecked Sendable {
     @discardableResult
     func insert(name: String, type: ClothingType, colorHex: String = "#3366FF",
                 opacity: Double = 0.7, pattern: String = "solid",
-                notes: String = "", createdAt: Double? = nil) -> Int64 {
-        let sql = "INSERT INTO clothing (name, type, color_hex, opacity, pattern, notes, created_at, is_active) VALUES (?,?,?,?,?,?,?,1)"
+                modelFile: String = "", notes: String = "", createdAt: Double? = nil) -> Int64 {
+        let sql = "INSERT INTO clothing (name, type, color_hex, opacity, pattern, model_file, notes, created_at, is_active) VALUES (?,?,?,?,?,?,?,?,1)"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return -1 }
         defer { sqlite3_finalize(stmt) }
@@ -118,8 +117,9 @@ final class ClothingDatabase: @unchecked Sendable {
         sqlite3_bind_text(stmt, 3, (colorHex as NSString).utf8String, -1, nil)
         sqlite3_bind_double(stmt, 4, opacity)
         sqlite3_bind_text(stmt, 5, (pattern as NSString).utf8String, -1, nil)
-        sqlite3_bind_text(stmt, 6, (notes as NSString).utf8String, -1, nil)
-        sqlite3_bind_double(stmt, 7, createdAt ?? Date().timeIntervalSince1970)
+        sqlite3_bind_text(stmt, 6, (modelFile as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(stmt, 7, (notes as NSString).utf8String, -1, nil)
+        sqlite3_bind_double(stmt, 8, createdAt ?? Date().timeIntervalSince1970)
 
         if sqlite3_step(stmt) == SQLITE_DONE {
             return sqlite3_last_insert_rowid(db)
@@ -128,7 +128,7 @@ final class ClothingDatabase: @unchecked Sendable {
     }
 
     func fetchAll() -> [ClothingItem] {
-        let sql = "SELECT id, name, type, color_hex, opacity, pattern, notes, created_at, is_active FROM clothing ORDER BY type, name"
+        let sql = "SELECT id, name, type, color_hex, opacity, pattern, model_file, notes, created_at, is_active FROM clothing ORDER BY type, name"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }
@@ -141,7 +141,7 @@ final class ClothingDatabase: @unchecked Sendable {
     }
 
     func fetchByType(_ type: ClothingType) -> [ClothingItem] {
-        let sql = "SELECT id, name, type, color_hex, opacity, pattern, notes, created_at, is_active FROM clothing WHERE type = ? ORDER BY name"
+        let sql = "SELECT id, name, type, color_hex, opacity, pattern, model_file, notes, created_at, is_active FROM clothing WHERE type = ? ORDER BY name"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }
@@ -155,7 +155,7 @@ final class ClothingDatabase: @unchecked Sendable {
     }
 
     func fetchActive() -> [ClothingItem] {
-        let sql = "SELECT id, name, type, color_hex, opacity, pattern, notes, created_at, is_active FROM clothing WHERE is_active = 1 ORDER BY type"
+        let sql = "SELECT id, name, type, color_hex, opacity, pattern, model_file, notes, created_at, is_active FROM clothing WHERE is_active = 1 ORDER BY type"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }
@@ -168,7 +168,7 @@ final class ClothingDatabase: @unchecked Sendable {
     }
 
     func update(_ item: ClothingItem) {
-        let sql = "UPDATE clothing SET name=?, type=?, color_hex=?, opacity=?, pattern=?, notes=?, is_active=? WHERE id=?"
+        let sql = "UPDATE clothing SET name=?, type=?, color_hex=?, opacity=?, pattern=?, model_file=?, notes=?, is_active=? WHERE id=?"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(stmt) }
@@ -178,9 +178,10 @@ final class ClothingDatabase: @unchecked Sendable {
         sqlite3_bind_text(stmt, 3, (item.colorHex as NSString).utf8String, -1, nil)
         sqlite3_bind_double(stmt, 4, item.opacity)
         sqlite3_bind_text(stmt, 5, (item.pattern as NSString).utf8String, -1, nil)
-        sqlite3_bind_text(stmt, 6, (item.notes as NSString).utf8String, -1, nil)
-        sqlite3_bind_int(stmt, 7, item.isActive ? 1 : 0)
-        sqlite3_bind_int64(stmt, 8, item.id)
+        sqlite3_bind_text(stmt, 6, (item.modelFile as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(stmt, 7, (item.notes as NSString).utf8String, -1, nil)
+        sqlite3_bind_int(stmt, 8, item.isActive ? 1 : 0)
+        sqlite3_bind_int64(stmt, 9, item.id)
 
         sqlite3_step(stmt)
     }
@@ -230,9 +231,10 @@ final class ClothingDatabase: @unchecked Sendable {
             colorHex: String(cString: sqlite3_column_text(stmt, 3)),
             opacity: sqlite3_column_double(stmt, 4),
             pattern: String(cString: sqlite3_column_text(stmt, 5)),
-            notes: String(cString: sqlite3_column_text(stmt, 6)),
-            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7)),
-            isActive: sqlite3_column_int(stmt, 8) == 1
+            modelFile: sqlite3_column_text(stmt, 6) != nil ? String(cString: sqlite3_column_text(stmt, 6)) : "",
+            notes: sqlite3_column_text(stmt, 7) != nil ? String(cString: sqlite3_column_text(stmt, 7)) : "",
+            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 8)),
+            isActive: sqlite3_column_int(stmt, 9) == 1
         )
     }
 
