@@ -191,16 +191,18 @@ final class ObjectDetector: @unchecked Sendable {
         // UV: u=좌우(0~1), v=상하(0=아래, 1=위)
         // FLAME 메시에서: 눈 y≈0.12, 코 y≈-0.04, 입 y≈-0.10, 정수리 y≈0.13, 턱 y≈-0.19
         // 정규화: 눈=(0.35,0.62)/(0.65,0.62), 코=(0.50,0.47), 입=(0.50,0.38)
-        // FLAME 메시 정점에서 측정한 실제 UV 좌표
+        // FLAME 메시 정점에서 실측한 UV 좌표
         let uvLeftEye = CGPoint(x: 0.405, y: 0.761)
         let uvRightEye = CGPoint(x: 0.598, y: 0.761)
         let uvNose = CGPoint(x: 0.508, y: 0.554)
+        let uvMouth = CGPoint(x: 0.506, y: 0.425)
 
-        // 정렬 텍스처 생성: 사진의 눈/코 위치를 FLAME UV 위치에 맞춤
         guard let alignedTexture = createAlignedTexture(
             source: cgImage,
-            srcLeftEye: leftEyeAbs, srcRightEye: rightEyeAbs, srcNose: noseAbs,
-            dstLeftEye: uvLeftEye, dstRightEye: uvRightEye, dstNose: uvNose
+            srcLeftEye: leftEyeAbs, srcRightEye: rightEyeAbs,
+            srcNose: noseAbs, srcMouth: mouthAbs,
+            dstLeftEye: uvLeftEye, dstRightEye: uvRightEye,
+            dstNose: uvNose, dstMouth: uvMouth
         ) else {
             log("[FaceSwap] 텍스처 정렬 실패"); return
         }
@@ -216,45 +218,42 @@ final class ObjectDetector: @unchecked Sendable {
 
     var hasReferenceFace: Bool { referenceFace != nil || is3DSource }
 
-    /// 3포인트 정렬: 눈 중심(스케일+회전) + 입 중심(수직 위치) → FLAME UV에 매칭
+    /// 4포인트 정렬: 눈(수평) + 코(수직상단) + 입(수직하단) → FLAME UV 매칭
     private func createAlignedTexture(
         source: CGImage,
-        srcLeftEye: CGPoint, srcRightEye: CGPoint, srcNose: CGPoint,
-        dstLeftEye: CGPoint, dstRightEye: CGPoint, dstNose: CGPoint
+        srcLeftEye: CGPoint, srcRightEye: CGPoint,
+        srcNose: CGPoint, srcMouth: CGPoint,
+        dstLeftEye: CGPoint, dstRightEye: CGPoint,
+        dstNose: CGPoint, dstMouth: CGPoint
     ) -> CGImage? {
         let texSize: CGFloat = 1024
         let ci = CIImage(cgImage: source)
 
-        // --- 소스 측정 ---
         let srcEyeCenter = CGPoint(x: (srcLeftEye.x + srcRightEye.x) / 2,
                                     y: (srcLeftEye.y + srcRightEye.y) / 2)
-        let srcDx = srcRightEye.x - srcLeftEye.x
-        let srcDy = srcRightEye.y - srcLeftEye.y
-        let srcEyeDist = sqrt(srcDx * srcDx + srcDy * srcDy)
-        let srcAngle = atan2(srcDy, srcDx)
-
-        // 소스 눈→코 수직 거리 (회전 보정 전)
-        let srcEyeToNose = sqrt(pow(srcNose.x - srcEyeCenter.x, 2) + pow(srcNose.y - srcEyeCenter.y, 2))
+        let srcEyeDist = sqrt(pow(srcRightEye.x - srcLeftEye.x, 2) + pow(srcRightEye.y - srcLeftEye.y, 2))
+        let srcAngle = atan2(srcRightEye.y - srcLeftEye.y, srcRightEye.x - srcLeftEye.x)
 
         guard srcEyeDist > 1 else { return nil }
 
-        // --- 목표 (FLAME UV 픽셀 좌표) ---
+        // 목표 (FLAME UV → 픽셀)
         let dstEyeCenter = CGPoint(x: (dstLeftEye.x + dstRightEye.x) / 2 * texSize,
                                     y: (dstLeftEye.y + dstRightEye.y) / 2 * texSize)
         let dstEyeDist = (dstRightEye.x - dstLeftEye.x) * texSize
-        let dstNosePx = CGPoint(x: dstNose.x * texSize, y: dstNose.y * texSize)
+        let dstMouthPx = CGPoint(x: dstMouth.x * texSize, y: dstMouth.y * texSize)
 
-        // --- 스케일 계산: 수평(눈 간 거리) + 수직(눈→코 거리) 독립 ---
-        let scaleH = dstEyeDist / srcEyeDist
-        let dstEyeToNose = sqrt(pow(dstNosePx.x - dstEyeCenter.x, 2) + pow(dstNosePx.y - dstEyeCenter.y, 2))
-        let scaleV = srcEyeToNose > 1 ? dstEyeToNose / srcEyeToNose : scaleH
-        // 평균 스케일 사용 (얼굴 비율 왜곡 방지)
-        let scale = (scaleH + scaleV) / 2
+        // 수평 스케일 (눈 간 거리)
+        let scaleX = dstEyeDist / srcEyeDist
 
-        // --- 변환 적용 ---
+        // 수직 스케일 (눈→입 전체 거리 — 코보다 안정적)
+        let srcEyeToMouthY = abs(srcEyeCenter.y - srcMouth.y)
+        let dstEyeToMouthY = abs(dstEyeCenter.y - dstMouthPx.y)
+        let scaleY = srcEyeToMouthY > 1 ? dstEyeToMouthY / srcEyeToMouthY : scaleX
+
+        // 변환: 1)눈 중심 원점 → 2)회전 → 3)독립 스케일 → 4)목표 위치 이동
         var t = CGAffineTransform(translationX: -srcEyeCenter.x, y: -srcEyeCenter.y)
         t = t.concatenating(CGAffineTransform(rotationAngle: -srcAngle))
-        t = t.concatenating(CGAffineTransform(scaleX: scale, y: scale))
+        t = t.concatenating(CGAffineTransform(scaleX: scaleX, y: scaleY))
         t = t.concatenating(CGAffineTransform(translationX: dstEyeCenter.x, y: dstEyeCenter.y))
 
         let transformed = ci.transformed(by: t)
