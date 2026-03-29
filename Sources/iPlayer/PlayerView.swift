@@ -249,6 +249,8 @@ final class PlayerView: NSView {
 
         controller.onTimeUpdate = { [weak self] current, total in
             guard let self = self else { return }
+            // 카메라 모드에서는 시간/seekbar 업데이트 불필요
+            if self.controller.inputSource == .camera { return }
             if !self.seekBar.isSeeking {
                 self.updateTimeDisplay(current: current, total: total)
             }
@@ -260,15 +262,17 @@ final class PlayerView: NSView {
         }
 
         controller.onSubtitleUpdate = { [weak self] text in
+            guard self?.controller.inputSource != .camera else { return }
             self?.updateSubtitle(text)
         }
 
         controller.onStateChange = { [weak self] state in
+            guard self?.controller.inputSource != .camera else { return }
             self?.updatePlayButton(state: state)
         }
 
         controller.onBuffering = { [weak self] buffering in
-            guard let self = self else { return }
+            guard let self = self, self.controller.inputSource != .camera else { return }
             self.bufferingView.isHidden = !buffering
             if buffering {
                 self.bufferingSpinner.startAnimation(nil)
@@ -277,10 +281,29 @@ final class PlayerView: NSView {
 
         controller.onInputSourceChange = { [weak self] source in
             guard let self = self else { return }
-            // 카메라 모드: 컨트롤 바 숨김
-            self.controlBar.isHidden = (source == .camera)
-            if source == .camera {
+            let isCam = (source == .camera)
+
+            // 비디오 전용 UI 전체 비활성화
+            self.controlBar.isHidden = isCam
+            self.seekBar.isHidden = isCam
+            self.subtitleLabel.isHidden = true
+            self.bufferingView.isHidden = true
+
+            // 오디오 미터 (카메라에는 오디오 없음)
+            if isCam { self.audioMeterView.isHidden = true }
+
+            // 창 제목
+            if isCam {
                 self.window?.title = "iPlayer - 카메라: \(self.controller.cameraController.currentDeviceName)"
+                // 마우스 커서 항상 표시
+                NSCursor.unhide()
+                self.hideTimer?.invalidate()
+            }
+
+            // 파일 모드 복귀 시 UI 복원
+            if !isCam {
+                self.controlBar.isHidden = false
+                self.seekBar.isHidden = false
             }
         }
 
@@ -557,7 +580,7 @@ final class PlayerView: NSView {
     }
 
     private func updateAudioMeter() {
-        guard showInfo else {
+        guard showInfo, controller.inputSource != .camera else {
             audioMeterView.isHidden = true
             return
         }
@@ -733,6 +756,11 @@ final class PlayerView: NSView {
     }
 
     private func showControls() {
+        // 카메라 모드: 컨트롤 바 없음, 커서 항상 표시
+        if controller.inputSource == .camera {
+            NSCursor.unhide()
+            return
+        }
         controlBar.isHidden = false
         controlsVisible = true
         NSCursor.unhide()
@@ -740,6 +768,7 @@ final class PlayerView: NSView {
         hideTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self = self, self.controller.state == .playing else { return }
+                guard self.controller.inputSource != .camera else { return }
                 self.controlBar.isHidden = true
                 self.controlsVisible = false
                 NSCursor.hide()
