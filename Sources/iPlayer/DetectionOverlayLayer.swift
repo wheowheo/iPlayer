@@ -147,12 +147,11 @@ final class DetectionOverlayLayer: CALayer {
 
     // MARK: - 옷 입어보기
 
-    // 3D 의류 렌더러 (지연 초기화)
+    // 2D 의류 렌더러
     private lazy var clothingRenderer = ClothingRenderer3D()
-    private var lastClothingId: Int64 = -1
 
     private func drawClothing(_ poses: [PoseResult], item: ClothingItem?, swipe: String?, in ctx: CGContext, bounds: CGRect) {
-        // 스켈레톤 그리기 (반투명)
+        // 스켈레톤 (반투명)
         for pose in poses {
             ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.3).cgColor)
             ctx.setLineWidth(1.5); ctx.setLineCap(.round)
@@ -164,84 +163,79 @@ final class DetectionOverlayLayer: CALayer {
             ctx.strokePath()
         }
 
-        guard let clothing = item, let pose = poses.first else { return }
+        guard let clothing = item, let pose = poses.first, !clothing.modelFile.isEmpty else { return }
         let joints = pose.joints
-        // 인덱스: 0=nose,1=neck,2=lShoulder,3=rShoulder,...,8=root,9=lHip,10=rHip,...
 
-        func pt(_ i: Int) -> CGPoint? {
+        func jp(_ i: Int) -> CGPoint? {
             guard i < joints.count, joints[i].confidence > 0.1 else { return nil }
             return toPoint(joints[i].location, in: bounds)
         }
 
-        // 3D 모델이 있으면 SceneKit 렌더링
-        if !clothing.modelFile.isEmpty {
-            if clothing.id != lastClothingId {
-                clothingRenderer.loadModel(item: clothing)
-                lastClothingId = clothing.id
+        // 의류 PNG 로드
+        guard let clothImg = clothingRenderer.loadImage(for: clothing) else { return }
+
+        // 관절 4점으로 원근 워핑 영역 결정 (CALayer y-up 좌표)
+        let tl: CGPoint, tr: CGPoint, bl: CGPoint, br: CGPoint
+
+        switch clothing.type {
+        case .hat:
+            guard let nose = jp(0), let neck = jp(1) else { return }
+            let headH = abs(nose.y - neck.y) * 0.8
+            let headW = headH * 2.0
+            let cx = nose.x
+            // y-up: 모자는 코 위에
+            tl = CGPoint(x: cx - headW/2, y: nose.y + headH)
+            tr = CGPoint(x: cx + headW/2, y: nose.y + headH)
+            bl = CGPoint(x: cx - headW/2 * 0.9, y: nose.y + headH * 0.1)
+            br = CGPoint(x: cx + headW/2 * 0.9, y: nose.y + headH * 0.1)
+
+        case .bottom:
+            guard let lh = jp(9), let rh = jp(10) else { return }
+            let la = jp(13) ?? jp(11) ?? CGPoint(x: lh.x, y: lh.y - bounds.height * 0.3)
+            let ra = jp(14) ?? jp(12) ?? CGPoint(x: rh.x, y: rh.y - bounds.height * 0.3)
+            let expandX = abs(rh.x - lh.x) * 0.3
+            // y-up: 엉덩이가 위, 발이 아래
+            tl = CGPoint(x: lh.x - expandX, y: lh.y)
+            tr = CGPoint(x: rh.x + expandX, y: rh.y)
+            bl = CGPoint(x: la.x - expandX * 0.5, y: la.y)
+            br = CGPoint(x: ra.x + expandX * 0.5, y: ra.y)
+
+        default: // top, fullBody
+            guard let ls = jp(2), let rs = jp(3) else { return }
+            let expandX = abs(rs.x - ls.x) * 0.3
+            let lBottom: CGPoint, rBottom: CGPoint
+            if clothing.type == .fullBody {
+                lBottom = jp(13) ?? jp(11) ?? jp(9) ?? CGPoint(x: ls.x, y: ls.y - bounds.height * 0.4)
+                rBottom = jp(14) ?? jp(12) ?? jp(10) ?? CGPoint(x: rs.x, y: rs.y - bounds.height * 0.4)
+            } else {
+                lBottom = jp(9) ?? CGPoint(x: ls.x, y: ls.y - bounds.height * 0.25)
+                rBottom = jp(10) ?? CGPoint(x: rs.x, y: rs.y - bounds.height * 0.25)
             }
-
-            if let rendered = clothingRenderer.render(
-                shoulderLeft: pt(2), shoulderRight: pt(3), hip: pt(8)
-            ) {
-                // 의류 타입별 위치 결정
-                // Vision y-up: 머리(y 큼) → 발(y 작음)
-                let drawRect: CGRect
-
-                switch clothing.type {
-                case .hat:
-                    // 머리 위: 코(0) 위쪽
-                    if let nose = pt(0), let neck = pt(1) {
-                        let headH = abs(nose.y - neck.y) * 1.2
-                        let headW = headH * 1.8
-                        drawRect = CGRect(x: nose.x - headW / 2, y: nose.y, width: headW, height: headH)
-                    } else { return }
-
-                case .bottom:
-                    // 엉덩이 → 발목
-                    if let lh = pt(9), let rh = pt(10) {
-                        let la = pt(13) ?? pt(11) ?? lh
-                        let ra = pt(14) ?? pt(12) ?? rh
-                        let top = max(lh.y, rh.y)
-                        let bot = min(la.y, ra.y)
-                        let left = min(lh.x, rh.x, la.x, ra.x)
-                        let right = max(lh.x, rh.x, la.x, ra.x)
-                        let w = right - left
-                        drawRect = CGRect(x: left - w * 0.2, y: bot, width: w * 1.4, height: top - bot)
-                    } else { return }
-
-                case .top, .fullBody, .accessory:
-                    // 어깨 → 엉덩이 (상의/전신)
-                    let ls = pt(2), rs = pt(3), lh = pt(9), rh = pt(10)
-                    if let ls = ls, let rs = rs {
-                        let top = max(ls.y, rs.y)
-                        let bot: CGFloat
-                        if clothing.type == .fullBody {
-                            let la = pt(13) ?? pt(11)
-                            let ra = pt(14) ?? pt(12)
-                            bot = min(la?.y ?? (lh?.y ?? top - 200), ra?.y ?? (rh?.y ?? top - 200))
-                        } else {
-                            bot = min(lh?.y ?? top - 150, rh?.y ?? top - 150)
-                        }
-                        let left = min(ls.x, rs.x)
-                        let right = max(ls.x, rs.x)
-                        let bodyW = right - left
-                        let bodyH = top - bot
-                        drawRect = CGRect(x: left - bodyW * 0.25, y: bot - bodyH * 0.05,
-                                          width: bodyW * 1.5, height: bodyH * 1.15)
-                    } else { return }
-                }
-
-                ctx.draw(rendered, in: drawRect)
-            }
+            // y-up: 어깨가 위, 엉덩이/발이 아래
+            tl = CGPoint(x: ls.x - expandX, y: ls.y + abs(ls.y - lBottom.y) * 0.05)
+            tr = CGPoint(x: rs.x + expandX, y: rs.y + abs(rs.y - rBottom.y) * 0.05)
+            bl = CGPoint(x: lBottom.x - expandX * 0.7, y: lBottom.y)
+            br = CGPoint(x: rBottom.x + expandX * 0.7, y: rBottom.y)
         }
 
-        // 옷 이름 표시 (하단 중앙)
-        let nameStr = "\(clothing.name) (\(clothing.type.rawValue))"
-        drawLabel(nameStr, at: CGPoint(x: (bounds.width - 100) / 2, y: 20), color: .systemBlue, in: ctx)
+        // 원근 워핑된 의류 합성
+        if let warped = clothingRenderer.warpToBody(
+            image: clothImg, topLeft: tl, topRight: tr, bottomLeft: bl, bottomRight: br,
+            tintColor: clothing.color, opacity: CGFloat(clothing.opacity)
+        ) {
+            // warped 이미지의 extent가 이미 최종 위치
+            // ctx.draw는 rect에 맞춰 그리므로, extent를 rect로 사용
+            let warpedCI = CIImage(cgImage: warped)
+            let ext = warpedCI.extent
+            ctx.draw(warped, in: ext)
+        }
 
-        // 스와이프 표시
+        // 옷 이름
+        drawLabel("\(clothing.name) (\(clothing.type.rawValue))",
+                  at: CGPoint(x: (bounds.width - 100) / 2, y: 20), color: .systemBlue, in: ctx)
+
         if let dir = swipe {
-            drawLabel("스와이프 \(dir)", at: CGPoint(x: bounds.width / 2 - 40, y: bounds.height / 2), color: .systemYellow, in: ctx)
+            drawLabel("스와이프 \(dir)", at: CGPoint(x: bounds.width/2 - 40, y: bounds.height/2), color: .systemYellow, in: ctx)
         }
     }
 
