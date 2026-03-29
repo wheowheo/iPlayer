@@ -121,8 +121,8 @@ final class ObjectDetector: @unchecked Sendable {
     var onClothingChanged: ((ClothingItem?) -> Void)?
 
     // 손 스와이프 감지
-    private var handHistory: [(x: CGFloat, time: Double)] = []  // wrist x 좌표 이력
-    private var lastSwipeTime: Double = 0
+    private var handHistory: [(x: CGFloat, time: Double)] = []
+    private var lastSwipeTime: Double = -10  // 즉시 첫 스와이프 허용
 
     private let resultsLock = NSLock()
     private var _latestResult: DetectionResult = .empty
