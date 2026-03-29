@@ -300,10 +300,22 @@ final class PlayerView: NSView {
                 self.hideTimer?.invalidate()
             }
 
-            // 파일 모드 복귀 시 UI 복원
+            // 파일 모드 복귀 시 UI 복원 + 화면 클리어
             if !isCam {
+                // 비디오 레이어 초기화 (카메라 잔상 제거)
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                self.videoLayer.contents = nil
+                self.detectionLayer.result = .empty
+                self.detectionLayer.detectionState = .idle
+                CATransaction.commit()
+
                 self.controlBar.isHidden = false
                 self.seekBar.isHidden = false
+                self.timeLabel.stringValue = "00:00 / 00:00"
+                self.seekBar.progress = 0
+                self.playButton.image = self.sfSymbol("play.fill", size: 16)
+                self.window?.title = "iPlayer"
             }
         }
 

@@ -396,11 +396,27 @@ final class PlayerController: @unchecked Sendable {
 
     func stopCamera() {
         cameraController.stop()
+        cameraController.onFrameReady = nil
+
+        queueLock.lock()
+        frameRing.removeAll()
+        queueLock.unlock()
+
+        currentTime = 0
+        duration = 0
         inputSource = .file
         state = .stopped
-        onStateChange?(state)
-        onInputSourceChange?(.file)
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.onStateChange?(self.state)
+            self.onTimeUpdate?(0, 0)
+            self.onInputSourceChange?(.file)
+        }
     }
+
+    /// 카메라 종료 시 화면 클리어 콜백
+    var onCameraStopped: (() -> Void)?
 
     // MARK: - 프레임 타이밍
 
