@@ -1108,6 +1108,11 @@ final class PlayerView: NSView {
             }
         }
 
+        // 옷 입어보기: 의류 데이터 로드
+        if mode == .clothingTryOn {
+            objectDetector.loadClothingItems()
+        }
+
         objectDetectionEnabled = true
         objectDetector.isEnabled = true
         objectDetector.reset()

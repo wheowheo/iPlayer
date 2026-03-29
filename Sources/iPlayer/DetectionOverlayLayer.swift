@@ -36,6 +36,7 @@ final class DetectionOverlayLayer: CALayer {
         case .texts(let v):        drawTexts(v, in: ctx, bounds: b)
         case .segmentation(let img): ctx.draw(img, in: b)
         case .faceSwap(let entries): drawFaceSwap(entries, in: ctx, bounds: b)
+        case .clothing(let poses, let item, let swipe): drawClothing(poses, item: item, swipe: swipe, in: ctx, bounds: b)
         case .empty: break
         }
 
@@ -142,6 +143,131 @@ final class DetectionOverlayLayer: CALayer {
             ctx.setStrokeColor(NSColor.systemYellow.cgColor); ctx.setLineWidth(1.5); ctx.stroke(rect)
             drawLabel(t.text, at: CGPoint(x: rect.minX, y: rect.maxY), color: .systemYellow, in: ctx)
         }
+    }
+
+    // MARK: - 옷 입어보기
+
+    private func drawClothing(_ poses: [PoseResult], item: ClothingItem?, swipe: String?, in ctx: CGContext, bounds: CGRect) {
+        // 스켈레톤 그리기 (반투명)
+        for pose in poses {
+            ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.3).cgColor)
+            ctx.setLineWidth(1.5); ctx.setLineCap(.round)
+            for (fi, ti) in pose.connections {
+                let p1 = toPoint(pose.joints[fi].location, in: bounds)
+                let p2 = toPoint(pose.joints[ti].location, in: bounds)
+                ctx.move(to: p1); ctx.addLine(to: p2)
+            }
+            ctx.strokePath()
+        }
+
+        // 옷 그리기
+        guard let clothing = item, let pose = poses.first else { return }
+        let joints = pose.joints
+        // 인덱스: 0=nose,1=neck,2=lShoulder,3=rShoulder,4=lElbow,5=rElbow,6=lWrist,7=rWrist,8=root,9=lHip,10=rHip,11=lKnee,12=rKnee,13=lAnkle,14=rAnkle
+
+        let c = clothing.color
+        let color = NSColor(red: c.r, green: c.g, blue: c.b, alpha: CGFloat(clothing.opacity))
+
+        func pt(_ i: Int) -> CGPoint? {
+            guard i < joints.count, joints[i].confidence > 0.1 else { return nil }
+            return toPoint(joints[i].location, in: bounds)
+        }
+
+        switch clothing.type {
+        case .top:
+            // 어깨 → 엉덩이 사각형
+            if let ls = pt(2), let rs = pt(3), let lh = pt(9), let rh = pt(10) {
+                drawQuad(ls, rs, rh, lh, color: color, pattern: clothing.pattern, in: ctx)
+                // 팔: 어깨→팔꿈치
+                if let le = pt(4) { drawLimb(ls, le, width: 20, color: color, in: ctx) }
+                if let re = pt(5) { drawLimb(rs, re, width: 20, color: color, in: ctx) }
+            }
+        case .bottom:
+            // 엉덩이 → 무릎/발목
+            if let lh = pt(9), let rh = pt(10) {
+                let lEnd = pt(13) ?? pt(11) ?? lh
+                let rEnd = pt(14) ?? pt(12) ?? rh
+                // 왼쪽 다리
+                drawLimb(lh, lEnd, width: 25, color: color, in: ctx)
+                // 오른쪽 다리
+                drawLimb(rh, rEnd, width: 25, color: color, in: ctx)
+            }
+        case .fullBody:
+            if let ls = pt(2), let rs = pt(3) {
+                let lEnd = pt(11) ?? pt(9) ?? ls
+                let rEnd = pt(12) ?? pt(10) ?? rs
+                drawQuad(ls, rs, rEnd, lEnd, color: color, pattern: clothing.pattern, in: ctx)
+            }
+        case .hat:
+            if let nose = pt(0), let neck = pt(1) {
+                let headH = abs(nose.y - neck.y) * 0.8
+                let headW = headH * 1.5
+                let hatRect = CGRect(x: nose.x - headW/2, y: nose.y + headH * 0.3, width: headW, height: headH * 0.6)
+                ctx.setFillColor(color.cgColor)
+                ctx.fill(hatRect)
+            }
+        case .accessory:
+            break
+        }
+
+        // 옷 이름 표시 (하단 중앙)
+        let nameStr = "\(clothing.name)  (\(clothing.type.rawValue))"
+        let nameAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 16, weight: .bold),
+            .foregroundColor: NSColor.white
+        ]
+        let attrName = NSAttributedString(string: nameStr, attributes: nameAttrs)
+        let nameSize = attrName.size()
+        let nameRect = CGRect(x: (bounds.width - nameSize.width - 20) / 2, y: 20,
+                              width: nameSize.width + 20, height: nameSize.height + 10)
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.6).cgColor)
+        ctx.addPath(CGPath(roundedRect: nameRect, cornerWidth: 8, cornerHeight: 8, transform: nil))
+        ctx.fillPath()
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        attrName.draw(at: CGPoint(x: nameRect.minX + 10, y: nameRect.minY + 5))
+        NSGraphicsContext.restoreGraphicsState()
+
+        // 스와이프 방향 표시
+        if let dir = swipe {
+            drawLabel("스와이프 \(dir)", at: CGPoint(x: bounds.width/2 - 40, y: bounds.height/2), color: .systemYellow, in: ctx)
+        }
+    }
+
+    private func drawQuad(_ p1: CGPoint, _ p2: CGPoint, _ p3: CGPoint, _ p4: CGPoint,
+                           color: NSColor, pattern: String, in ctx: CGContext) {
+        ctx.setFillColor(color.cgColor)
+        ctx.move(to: p1); ctx.addLine(to: p2); ctx.addLine(to: p3); ctx.addLine(to: p4)
+        ctx.closePath(); ctx.fillPath()
+
+        if pattern == "stripe" {
+            ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.3).cgColor)
+            ctx.setLineWidth(2)
+            let minX = min(p1.x, min(p2.x, min(p3.x, p4.x)))
+            let maxX = max(p1.x, max(p2.x, max(p3.x, p4.x)))
+            let minY = min(p1.y, min(p2.y, min(p3.y, p4.y)))
+            let maxY = max(p1.y, max(p2.y, max(p3.y, p4.y)))
+            var x = minX
+            while x < maxX {
+                ctx.move(to: CGPoint(x: x, y: minY)); ctx.addLine(to: CGPoint(x: x, y: maxY))
+                x += 10
+            }
+            ctx.strokePath()
+        }
+    }
+
+    private func drawLimb(_ from: CGPoint, _ to: CGPoint, width: CGFloat, color: NSColor, in ctx: CGContext) {
+        let dx = to.x - from.x, dy = to.y - from.y
+        let len = sqrt(dx*dx + dy*dy)
+        guard len > 1 else { return }
+        let nx = -dy/len * width/2, ny = dx/len * width/2
+
+        ctx.setFillColor(color.cgColor)
+        ctx.move(to: CGPoint(x: from.x + nx, y: from.y + ny))
+        ctx.addLine(to: CGPoint(x: from.x - nx, y: from.y - ny))
+        ctx.addLine(to: CGPoint(x: to.x - nx, y: to.y - ny))
+        ctx.addLine(to: CGPoint(x: to.x + nx, y: to.y + ny))
+        ctx.closePath(); ctx.fillPath()
     }
 
     // MARK: - 얼굴 합성

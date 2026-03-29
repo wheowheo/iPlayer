@@ -16,10 +16,11 @@ enum DetectorMode: String, CaseIterable {
     case textRecognition = "텍스트 인식 (OCR)"
     case personSegmentation = "인물 분리"
     case faceSwap = "얼굴 합성 (Face Swap)"
+    case clothingTryOn = "옷 입어보기"
 
     var isBuiltIn: Bool {
         switch self {
-        case .pose, .faceLandmarks, .handPose, .textRecognition, .personSegmentation, .faceSwap: return true
+        case .pose, .faceLandmarks, .handPose, .textRecognition, .personSegmentation, .faceSwap, .clothingTryOn: return true
         case .objectDetection, .depth: return false
         }
     }
@@ -96,6 +97,7 @@ enum DetectionResult {
     case texts([TextResult])
     case segmentation(CGImage)
     case faceSwap([FaceSwapEntry])
+    case clothing(poses: [PoseResult], item: ClothingItem?, swipeDirection: String?)
     case empty
 }
 
@@ -111,7 +113,16 @@ final class ObjectDetector: @unchecked Sendable {
     private var referenceLandmarks: (leftEye: CGPoint, rightEye: CGPoint)?
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     private let faceRenderer3D = FaceRenderer3D()
-    private(set) var is3DSource = false  // 3D 모델 로드 여부
+    private(set) var is3DSource = false
+
+    // 옷 입어보기
+    private var clothingItems: [ClothingItem] = []
+    private(set) var currentClothingIndex = 0
+    var onClothingChanged: ((ClothingItem?) -> Void)?
+
+    // 손 스와이프 감지
+    private var handHistory: [(x: CGFloat, time: Double)] = []  // wrist x 좌표 이력
+    private var lastSwipeTime: Double = 0
 
     private let resultsLock = NSLock()
     private var _latestResult: DetectionResult = .empty
@@ -380,6 +391,7 @@ final class ObjectDetector: @unchecked Sendable {
         case .textRecognition: runTextRecognition(handler: handler, gen: gen)
         case .personSegmentation: runPersonSegmentation(handler: handler, gen: gen)
         case .faceSwap:          runFaceSwap(handler: handler, gen: gen)
+        case .clothingTryOn:     runClothingTryOn(handler: handler, gen: gen)
         }
     }
 
@@ -768,6 +780,97 @@ final class ObjectDetector: @unchecked Sendable {
         else if t < 0.75  { let s = (t-0.5)/0.25;  r=s; g=1; b=0 }
         else               { let s = (t-0.75)/0.25; r=1; g=1-s; b=0 }
         return (UInt8(r*255), UInt8(g*255), UInt8(b*255))
+    }
+
+    // MARK: - 옷 입어보기
+
+    func loadClothingItems() {
+        clothingItems = ClothingDatabase.shared.fetchActive()
+        currentClothingIndex = 0
+        log("[Clothing] 활성 의류 \(clothingItems.count)벌 로드")
+    }
+
+    var currentClothing: ClothingItem? {
+        guard !clothingItems.isEmpty else { return nil }
+        return clothingItems[currentClothingIndex % clothingItems.count]
+    }
+
+    func nextClothing() {
+        guard !clothingItems.isEmpty else { return }
+        currentClothingIndex = (currentClothingIndex + 1) % clothingItems.count
+        DispatchQueue.main.async { [weak self] in
+            self?.onClothingChanged?(self?.currentClothing)
+        }
+    }
+
+    func prevClothing() {
+        guard !clothingItems.isEmpty else { return }
+        currentClothingIndex = (currentClothingIndex - 1 + clothingItems.count) % clothingItems.count
+        DispatchQueue.main.async { [weak self] in
+            self?.onClothingChanged?(self?.currentClothing)
+        }
+    }
+
+    private func runClothingTryOn(handler: VNImageRequestHandler, gen: Int) {
+        // 자세 추정 + 손 감지 동시 실행
+        let poseReq = VNDetectHumanBodyPoseRequest()
+        let handReq = VNDetectHumanHandPoseRequest()
+        handReq.maximumHandCount = 2
+        try? handler.perform([poseReq, handReq])
+
+        guard gen == seekGeneration else { return }
+
+        // 자세 결과
+        var poses: [PoseResult] = []
+        if let obs = poseReq.results {
+            poses = obs.map { self.buildPose($0) }
+        }
+
+        // 손 스와이프 감지
+        let swipe = detectSwipe(from: handReq.results)
+
+        setResult(.clothing(poses: poses, item: currentClothing, swipeDirection: swipe))
+    }
+
+    private func detectSwipe(from results: [VNHumanHandPoseObservation]?) -> String? {
+        guard let hands = results, !hands.isEmpty else {
+            handHistory.removeAll()
+            return nil
+        }
+
+        // 첫 번째 손의 wrist 위치 추적
+        guard let wrist = try? hands[0].recognizedPoint(.wrist), wrist.confidence > 0.3 else { return nil }
+
+        let now = CACurrentMediaTime()
+        handHistory.append((x: wrist.location.x, time: now))
+
+        // 0.8초 이상 된 이력 제거
+        handHistory.removeAll { now - $0.time > 0.8 }
+
+        // 최소 5프레임 이력 필요
+        guard handHistory.count >= 5 else { return nil }
+
+        // 쿨다운: 마지막 스와이프 후 1초
+        guard now - lastSwipeTime > 1.0 else { return nil }
+
+        let firstX = handHistory.first!.x
+        let lastX = handHistory.last!.x
+        let dx = lastX - firstX
+
+        // 수평 이동량 > 0.25 (화면의 25%)
+        if dx > 0.25 {
+            lastSwipeTime = now
+            handHistory.removeAll()
+            nextClothing()
+            return "→"
+        } else if dx < -0.25 {
+            lastSwipeTime = now
+            handHistory.removeAll()
+            prevClothing()
+            return "←"
+        }
+
+        return nil
     }
 
     // MARK: - 얼굴 합성 (Face Swap)
